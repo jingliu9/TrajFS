@@ -140,6 +140,9 @@ pub struct WatchArgs {
     pub max_batches: u32,
     #[arg(long, default_value_t = 16)]
     pub jobs: usize,
+    /// Keep raw trajectory blobs but defer derived tables (useful for Git stores).
+    #[arg(long)]
+    pub no_derive: bool,
 }
 
 /// Polling watcher: discover matching run directories without descending into
@@ -161,7 +164,7 @@ pub fn watch(a: WatchArgs) -> Result<i32> {
                 .unwrap_or_default();
             if let Some(label) = ad.batch_ready(&run_dir, &already) {
                 eprintln!("{}: packing {label}", run_dir.display());
-                let r = run_args_for(&run_dir, &store, &cfg, &label, &id, a.jobs)?;
+                let r = run_args_for(&run_dir, &store, &cfg, &label, &id, a.jobs, a.no_derive)?;
                 run(r)?;
                 if a.commit {
                     crate::cmd::commit::run(crate::cmd::commit::CommitArgs {
@@ -230,6 +233,7 @@ fn run_args_for(
     label: &str,
     id: &str,
     jobs: usize,
+    no_derive: bool,
 ) -> Result<PackArgs> {
     Ok(PackArgs {
         src: run.to_path_buf(),
@@ -238,7 +242,7 @@ fn run_args_for(
         rules: None,
         label: label.to_string(),
         jobs,
-        no_derive: false,
+        no_derive,
         strict: false,
         id: Some(id.to_string()),
     })

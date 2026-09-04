@@ -947,7 +947,14 @@ label_ancestor_pattern = '^round-\d+$'
     fixture(&data.join("suite-b/task/run7"));
     traj()
         .current_dir(&repo)
-        .args(["watch", "--max-batches", "2", "--interval", "1"])
+        .args([
+            "watch",
+            "--max-batches",
+            "2",
+            "--interval",
+            "1",
+            "--no-derive",
+        ])
         .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success();
@@ -958,6 +965,10 @@ label_ancestor_pattern = '^round-\d+$'
             serde_json::from_str(&fs::read_to_string(manifest).unwrap()).unwrap();
         assert_eq!(value["store_id"], id);
         assert_eq!(value["batches"][0]["label"], "round-0001");
+        assert!(value["batches"][0]["derived"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }
 
