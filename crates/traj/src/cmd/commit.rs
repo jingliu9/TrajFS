@@ -20,7 +20,9 @@ pub fn run(a: CommitArgs) -> Result<i32> {
     let store = store.canonicalize()?;
     let repo = git_toplevel(&store).context("the store is not inside a git work tree")?;
     let m = trajfs_core::Manifest::load(&store)?;
-    let Some(last) = m.batches.last() else { bail!("store has no batches") };
+    let Some(last) = m.batches.last() else {
+        bail!("store has no batches")
+    };
     let rel = store.strip_prefix(&repo).unwrap_or(&store);
     let msg = a.message.clone().unwrap_or_else(|| {
         format!(
@@ -39,7 +41,12 @@ pub fn run(a: CommitArgs) -> Result<i32> {
         )
     });
     let git = |args: &[&str]| -> Result<()> {
-        let st = Command::new("git").arg("-C").arg(&repo).args(args).status().context("run git")?;
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .context("run git")?;
         if !st.success() {
             bail!("git {} failed", args.join(" "));
         }
@@ -47,8 +54,15 @@ pub fn run(a: CommitArgs) -> Result<i32> {
     };
     // only the store's own files: new batch files are the only untracked/changed ones
     git(&["add", "-A", "--", &rel.display().to_string()])?;
-    let staged = Command::new("git").arg("-C").arg(&repo).args(["diff", "--cached", "--name-only", "-z"]).output()?;
-    let n = String::from_utf8_lossy(&staged.stdout).split('\0').filter(|s| !s.is_empty()).count();
+    let staged = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .output()?;
+    let n = String::from_utf8_lossy(&staged.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .count();
     if n == 0 {
         println!("nothing to commit for {}", rel.display());
         return Ok(0);

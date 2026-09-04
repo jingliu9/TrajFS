@@ -1,4 +1,4 @@
-//! Generic trajectory-format parsers and the TOML-declared adapter (PLAN.md §3.6).
+//! Generic trajectory-format parsers and the TOML-declared adapter (docs/PLAN.md §3.6).
 //! Nothing in this crate knows a particular runner; a runner's adapter is a TOML file in the runner's repo.
 
 use std::path::Path;
@@ -32,9 +32,20 @@ pub fn resolve(spec: &str, base: Option<&Path>) -> anyhow::Result<Box<dyn Adapte
     Ok(match name {
         "none" => Box::new(trajfs_core::NoAdapter),
         "jsonl" => Box::new(jsonl::Jsonl::new(arg.unwrap_or("**/*.jsonl"))?),
-        "copilot-cli" => Box::new(FormatOnly { name: "copilot-cli", globs: globset_of(&["**/events.jsonl"])?, parser: copilot_cli::parse }),
-        "claude-code" => Box::new(FormatOnly { name: "claude-code", globs: globset_of(&["**/*.jsonl"])?, parser: claude_code::parse }),
-        other => anyhow::bail!("unknown adapter '{other}' (built-in: {}; or a path to an adapter .toml)", BUILTIN.join(", ")),
+        "copilot-cli" => Box::new(FormatOnly {
+            name: "copilot-cli",
+            globs: globset_of(&["**/events.jsonl"])?,
+            parser: copilot_cli::parse,
+        }),
+        "claude-code" => Box::new(FormatOnly {
+            name: "claude-code",
+            globs: globset_of(&["**/*.jsonl"])?,
+            parser: claude_code::parse,
+        }),
+        other => anyhow::bail!(
+            "unknown adapter '{other}' (built-in: {}; or a path to an adapter .toml)",
+            BUILTIN.join(", ")
+        ),
     })
 }
 
@@ -77,10 +88,16 @@ pub(crate) mod util {
 
     pub fn ts_us(v: Option<&Value>) -> Option<i64> {
         match v? {
-            Value::String(s) => chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_micros()),
+            Value::String(s) => chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|d| d.timestamp_micros()),
             Value::Number(n) => {
                 let f = n.as_f64()?;
-                Some(if f > 1e12 { (f * 1_000.0) as i64 } else { (f * 1_000_000.0) as i64 })
+                Some(if f > 1e12 {
+                    (f * 1_000.0) as i64
+                } else {
+                    (f * 1_000_000.0) as i64
+                })
             }
             _ => None,
         }
@@ -120,7 +137,12 @@ pub(crate) mod util {
     }
 
     pub fn unparsed(seq: i32, line: &str) -> Event {
-        Event { seq, r#type: "_unparsed".into(), payload_json: serde_json::to_string(line).unwrap_or_default(), ..Default::default() }
+        Event {
+            seq,
+            r#type: "_unparsed".into(),
+            payload_json: serde_json::to_string(line).unwrap_or_default(),
+            ..Default::default()
+        }
     }
 }
 
@@ -135,9 +157,36 @@ mod tests {
         std::fs::write(&p, "name = \"t\"\nrules = \"r.toml\"\n[[attrs]]\npattern = '^rounds/round-(?P<round>\\d+)/(?P<role>[^/]+)(?:/|$)'\nstrip_leading_zeros = [\"round\"]\n[trajectories]\nglobs = [\"**/events.jsonl\"]\nformat = \"copilot-cli\"\n").unwrap();
         std::fs::write(dir.path().join("r.toml"), "name = \"r\"\n").unwrap();
         let a = resolve(p.to_str().unwrap(), None).unwrap();
-        assert_eq!(a.attrs("rounds/round-0037/builder/x"), vec![("round".to_string(), "37".to_string()), ("role".to_string(), "builder".to_string())]);
+        assert_eq!(
+            a.attrs("rounds/round-0037/builder/x"),
+            vec![
+                ("round".to_string(), "37".to_string()),
+                ("role".to_string(), "builder".to_string())
+            ]
+        );
         assert!(a.attrs("other").is_empty());
         assert!(a.is_trajectory("a/b/events.jsonl"));
         assert!(a.rule_profile().unwrap().ends_with("/r.toml"));
+    }
+
+    #[test]
+    fn declared_adapter_labels_from_the_nearest_matching_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = dir.path().join("adapter.toml");
+        std::fs::write(
+            &adapter,
+            "name = \"t\"\n[batch_ready]\nrun_glob = \"**/run-*\"\n\
+             markers = [\"rounds/round-*/reviewer/review.json\"]\n\
+             label_ancestor_pattern = '^round-\\d+$'\n",
+        )
+        .unwrap();
+        let run = dir.path().join("run-1");
+        std::fs::create_dir_all(run.join("rounds/round-0037/reviewer")).unwrap();
+        std::fs::write(run.join("rounds/round-0037/reviewer/review.json"), "{}\n").unwrap();
+        let declared = resolve(adapter.to_str().unwrap(), None).unwrap();
+        assert_eq!(
+            declared.batch_ready(&run, &[]).as_deref(),
+            Some("round-0037")
+        );
     }
 }

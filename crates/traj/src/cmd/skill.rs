@@ -1,4 +1,4 @@
-//! Agent skill export (PLAN.md §13). The template is embedded so the skill always matches the binary.
+//! Agent skill export (docs/PLAN.md §13). The template is embedded so the skill always matches the binary.
 
 use crate::config::Config;
 use anyhow::{Context, Result};
@@ -29,15 +29,21 @@ pub enum Which {
 }
 
 pub const VERBS: &[&str] = &[
-    "init", "doctor", "pack", "watch", "ls", "tree", "find", "du", "stat", "cat", "extract", "edit", "grep", "sql", "derive", "verify", "commit", "skill", "hook", "bench",
+    "init", "doctor", "pack", "watch", "ls", "tree", "find", "du", "stat", "cat", "extract",
+    "edit", "grep", "sql", "derive", "verify", "commit", "skill", "hook", "bench",
 ];
 
 pub fn render(cfg: Option<&Config>) -> String {
     let (data, stores) = match cfg {
-        Some(c) => (c.data_root().display().to_string(), c.store_root().display().to_string()),
+        Some(c) => (
+            c.data_root().display().to_string(),
+            c.store_root().display().to_string(),
+        ),
         None => ("<data_root>".to_string(), "<store_root>".to_string()),
     };
-    let body = TEMPLATE.replace("{{data_root}}", &data).replace("{{store_root}}", &stores);
+    let body = TEMPLATE
+        .replace("{{data_root}}", &data)
+        .replace("{{store_root}}", &stores);
     format!("{body}\n<!-- traj-skill-version: {} -->\n", crate::VERSION)
 }
 
@@ -65,7 +71,12 @@ fn write_to(dir: &std::path::Path, cfg: Option<&Config>) -> Result<()> {
     let section = format!("{start}\n{body_no_fm}\n{end}\n");
     let existing = std::fs::read_to_string(&agents).unwrap_or_default();
     let new = match (existing.find(start), existing.find(end)) {
-        (Some(s), Some(e)) if e > s => format!("{}{}{}", &existing[..s], section, &existing[e + end.len()..].trim_start_matches('\n')),
+        (Some(s), Some(e)) if e > s => format!(
+            "{}{}{}",
+            &existing[..s],
+            section,
+            &existing[e + end.len()..].trim_start_matches('\n')
+        ),
         _ => {
             if existing.is_empty() {
                 format!("# Agent instructions\n\n{section}")
@@ -100,8 +111,14 @@ pub fn run(a: SkillArgs) -> Result<i32> {
                 (None, Some(c)) => c.dir.clone(),
                 (None, None) => anyhow::bail!("no trajfs.toml found; pass --out <dir>"),
             };
-            write_to(&dir, cfg.as_ref()).with_context(|| format!("write skill under {}", dir.display()))?;
-            println!("wrote {}/.claude/skills/traj/SKILL.md and {}/AGENTS.md (version {})", dir.display(), dir.display(), crate::VERSION);
+            write_to(&dir, cfg.as_ref())
+                .with_context(|| format!("write skill under {}", dir.display()))?;
+            println!(
+                "wrote {}/.claude/skills/traj/SKILL.md and {}/AGENTS.md (version {})",
+                dir.display(),
+                dir.display(),
+                crate::VERSION
+            );
             Ok(0)
         }
         Which::Verbs => {

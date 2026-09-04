@@ -1,4 +1,4 @@
-//! Exclusion rule profiles (PLAN.md §4.2), TOML, shipped in the crate or given as a file.
+//! Exclusion rule profiles (docs/PLAN.md §4.2), TOML, shipped in the crate or given as a file.
 
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -79,7 +79,11 @@ impl Rules {
         for g in &file.always_exclude {
             eb.add(Glob::new(g).with_context(|| format!("glob {g}"))?);
         }
-        Ok(Rules { file, keep: kb.build()?, exclude: eb.build()? })
+        Ok(Rules {
+            file,
+            keep: kb.build()?,
+            exclude: eb.build()?,
+        })
     }
 
     /// Resolve a profile by built-in name (`none`, `no-build-products`) or by path to a TOML file
@@ -102,14 +106,23 @@ impl Rules {
                 if !path.is_file() {
                     bail!("unknown rule profile '{p}' (built-in: none, no-build-products; or a path to a .toml file)");
                 }
-                Self::from_toml(&std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)
+                Self::from_toml(
+                    &std::fs::read_to_string(&path)
+                        .with_context(|| format!("read {}", path.display()))?,
+                )
             }
         }
     }
 
     /// Decide for a regular file or symlink. `rel` uses `/` separators. `is_elf` is evaluated lazily by the caller
     /// through the closure only when the rule needs it.
-    pub fn decide(&self, rel: &str, size: u64, is_symlink: bool, is_elf: &dyn Fn() -> bool) -> Decision {
+    pub fn decide(
+        &self,
+        rel: &str,
+        size: u64,
+        is_symlink: bool,
+        is_elf: &dyn Fn() -> bool,
+    ) -> Decision {
         if self.exclude.is_match(rel) {
             return Decision::Exclude("always_exclude");
         }
@@ -138,7 +151,9 @@ impl Rules {
             return Decision::Exclude("max_bytes");
         }
         for u in &self.file.exclude_under {
-            let under = dirs.iter().any(|d| u.dirs.iter().any(|p| d.starts_with(p.as_str())));
+            let under = dirs
+                .iter()
+                .any(|d| u.dirs.iter().any(|p| d.starts_with(p.as_str())));
             if !under {
                 continue;
             }
@@ -149,7 +164,11 @@ impl Rules {
                 return Decision::Exclude("exclude_under.max_bytes");
             }
         }
-        if ext.is_empty() && self.file.elf_min_bytes > 0 && size >= self.file.elf_min_bytes && is_elf() {
+        if ext.is_empty()
+            && self.file.elf_min_bytes > 0
+            && size >= self.file.elf_min_bytes
+            && is_elf()
+        {
             return Decision::Exclude("elf");
         }
         Decision::Keep
@@ -186,15 +205,50 @@ max_bytes = 2097152
     fn rule_engine_semantics() {
         let r = Rules::from_toml(EVIDENCE_PROFILE).unwrap();
         let no = &|| false;
-        assert_eq!(r.decide("a/.cache/x.json", 10, false, no), Decision::Exclude("exclude_dirs"));
-        assert_eq!(r.decide("a/x.pyc", 10, false, no), Decision::Exclude("exclude_ext"));
-        assert_eq!(r.decide("a/logs/round3/out.csv", 10, false, no), Decision::Exclude("exclude_under.ext"));
-        assert_eq!(r.decide("a/logs/round3/out.stdout", 3 << 20, false, no), Decision::Exclude("exclude_under.max_bytes"));
-        assert_eq!(r.decide("a/logs/round3/out.stdout", 100, false, no), Decision::Keep);
-        assert_eq!(r.decide("a/big.txt", 30 << 20, false, no), Decision::Exclude("max_bytes"));
-        assert_eq!(r.decide("rounds/round-0001/builder/call/events.jsonl", 30 << 20, false, no), Decision::Keep);
-        assert_eq!(r.decide("rounds/round-0001/builder/call/.cache/x", 1, false, no), Decision::Exclude("always_exclude"));
-        assert_eq!(r.decide("bin/tool", 100 << 10, false, &|| true), Decision::Exclude("exclude_dirs"));
-        assert_eq!(r.decide("src/tool", 100 << 10, false, &|| true), Decision::Exclude("elf"));
+        assert_eq!(
+            r.decide("a/.cache/x.json", 10, false, no),
+            Decision::Exclude("exclude_dirs")
+        );
+        assert_eq!(
+            r.decide("a/x.pyc", 10, false, no),
+            Decision::Exclude("exclude_ext")
+        );
+        assert_eq!(
+            r.decide("a/logs/round3/out.csv", 10, false, no),
+            Decision::Exclude("exclude_under.ext")
+        );
+        assert_eq!(
+            r.decide("a/logs/round3/out.stdout", 3 << 20, false, no),
+            Decision::Exclude("exclude_under.max_bytes")
+        );
+        assert_eq!(
+            r.decide("a/logs/round3/out.stdout", 100, false, no),
+            Decision::Keep
+        );
+        assert_eq!(
+            r.decide("a/big.txt", 30 << 20, false, no),
+            Decision::Exclude("max_bytes")
+        );
+        assert_eq!(
+            r.decide(
+                "rounds/round-0001/builder/call/events.jsonl",
+                30 << 20,
+                false,
+                no
+            ),
+            Decision::Keep
+        );
+        assert_eq!(
+            r.decide("rounds/round-0001/builder/call/.cache/x", 1, false, no),
+            Decision::Exclude("always_exclude")
+        );
+        assert_eq!(
+            r.decide("bin/tool", 100 << 10, false, &|| true),
+            Decision::Exclude("exclude_dirs")
+        );
+        assert_eq!(
+            r.decide("src/tool", 100 << 10, false, &|| true),
+            Decision::Exclude("elf")
+        );
     }
 }

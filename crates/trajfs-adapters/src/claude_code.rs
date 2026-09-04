@@ -17,12 +17,17 @@ pub fn parse(bytes: &[u8]) -> Vec<Event> {
         };
         let ty = str_of(&v, &["type"]).unwrap_or_else(|| "_untyped".into());
         let msg = v.get("message");
-        let actor = msg.and_then(|m| str_of(m, &["role"])).or_else(|| match ty.as_str() {
-            "user" | "assistant" | "system" => Some(ty.clone()),
-            _ => None,
-        });
+        let actor = msg
+            .and_then(|m| str_of(m, &["role"]))
+            .or_else(|| match ty.as_str() {
+                "user" | "assistant" | "system" => Some(ty.clone()),
+                _ => None,
+            });
         let mut tool_name = None;
-        if let Some(content) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        if let Some(content) = msg
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
             for block in content {
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                     tool_name = str_of(block, &["name"]);

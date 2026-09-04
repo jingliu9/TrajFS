@@ -1,11 +1,11 @@
 # trajfs — design and test plan
 
-Status: draft 2.5, 2026-09-04 (2.1 adds §6.1, raw data outside the repo; 2.2 adds §12 usage procedure and §13 agent skill; 2.3 adds §2.1 language rationale; 2.4: Rust everywhere, no Python in build or test paths; 2.5: FUSE removed entirely, no shell or Python anywhere, git hook is the binary itself). Draft 1 is kept as `PLAN.v1.md`. Change in draft 2: the core is format-agnostic; everything
+Status: draft 2.5, 2026-09-04 (2.1 adds §6.1, raw data outside the repo; 2.2 adds §12 usage procedure and §13 agent skill; 2.3 adds §2.1 language rationale; 2.4: Rust everywhere, no Python in build or test paths; 2.5: FUSE removed entirely, no shell or Python anywhere, git hook is the binary itself). Draft 1 is kept as `PLAN.v1.md` beside this file. Change in draft 2: the core is format-agnostic; everything
 that knows about a particular agent runner (onesw-gen rounds, GitHub Copilot CLI `events.jsonl`, Claude Code session
 logs, ...) lives in an **adapter**. The four fourth-grid onesw lanes remain the primary test dataset, not the design
 target.
 
-Derived from `idea.md` and `idea-review.md` (Review 1). Numbers quoted are Review 1 measurements on the fourth-grid run
+Derived from `idea.md` and `idea-review.md` (same directory) (Review 1). Numbers quoted are Review 1 measurements on the fourth-grid run
 `claude-opus-4.8-678xazw/onesw-generation-20260902T033145Z` (2.17 M paths, 12.9 GB kept, 23,864 distinct blobs).
 
 ## 1. Problem and goals
@@ -362,7 +362,7 @@ Prototype numbers on the reference run; the Rust build must meet or beat them.
 
 ## 9. Reserved
 
-(Section number kept so cross-references in `idea-review.md` stay valid; FUSE was removed from the plan in draft 2.5.)
+(Section number kept so cross-references in `docs/idea-review.md` stay valid; FUSE was removed from the plan in draft 2.5.)
 
 ## 10. Milestones
 

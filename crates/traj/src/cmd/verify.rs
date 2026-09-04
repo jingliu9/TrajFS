@@ -12,8 +12,16 @@ pub struct VerifyArgs {
 pub fn run(stores: &[String], a: VerifyArgs) -> Result<i32> {
     let st = one_store(stores)?;
     let rep = st.verify(a.deep)?;
-    println!("files: {}  blobs: {}  shadowed paths: {}", rep.files, rep.blobs, rep.shadowed_paths);
-    for (label, v) in [("missing packs", &rep.missing_packs), ("catalog rows without a blob", &rep.missing_blobs), ("bad parts", &rep.bad_parts), ("corrupt blobs", &rep.corrupt)] {
+    println!(
+        "files: {}  blobs: {}  shadowed paths: {}",
+        rep.files, rep.blobs, rep.shadowed_paths
+    );
+    for (label, v) in [
+        ("missing packs", &rep.missing_packs),
+        ("catalog rows without a blob", &rep.missing_blobs),
+        ("bad parts", &rep.bad_parts),
+        ("corrupt blobs", &rep.corrupt),
+    ] {
         if !v.is_empty() {
             println!("{label}: {}", v.len());
             for x in v.iter().take(20) {

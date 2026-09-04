@@ -1,4 +1,4 @@
-//! `traj sql`: DuckDB over the store's Parquet files (PLAN.md §5).
+//! `traj sql`: DuckDB over the store's Parquet files (docs/PLAN.md §5).
 
 use crate::config::{resolve_store, Config};
 use anyhow::{bail, Result};
@@ -24,13 +24,28 @@ pub struct StoreTables {
 
 pub fn view_sql(stores: &[StoreTables]) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let tables = [("files", "catalog/files-*.parquet"), ("dirs", "catalog/dirs-*.parquet"), ("excluded", "catalog/excluded-*.parquet"), ("blobs", "packs/index-*.parquet")];
+    let tables = [
+        ("files", "catalog/files-*.parquet"),
+        ("dirs", "catalog/dirs-*.parquet"),
+        ("excluded", "catalog/excluded-*.parquet"),
+        ("blobs", "packs/index-*.parquet"),
+    ];
     for (t, glob) in tables {
         let parts: Vec<String> = stores
             .iter()
-            .map(|s| format!("select '{}' as store, * from read_parquet('{}/{}', union_by_name=true)", s.name.replace('\'', "''"), s.root.display(), glob))
+            .map(|s| {
+                format!(
+                    "select '{}' as store, * from read_parquet('{}/{}', union_by_name=true)",
+                    s.name.replace('\'', "''"),
+                    s.root.display(),
+                    glob
+                )
+            })
             .collect();
-        out.push((t.to_string(), format!("create view {t} as {}", parts.join(" union all by name "))));
+        out.push((
+            t.to_string(),
+            format!("create view {t} as {}", parts.join(" union all by name ")),
+        ));
     }
     let ev: Vec<String> = stores
         .iter()
@@ -38,7 +53,10 @@ pub fn view_sql(stores: &[StoreTables]) -> Vec<(String, String)> {
         .map(|s| format!("select '{}' as store, * from read_parquet('{}/derived/{}/events-*.parquet', union_by_name=true)", s.name.replace('\'', "''"), s.root.display(), s.adapter))
         .collect();
     if !ev.is_empty() {
-        out.push(("events".into(), format!("create view events as {}", ev.join(" union all by name "))));
+        out.push((
+            "events".into(),
+            format!("create view events as {}", ev.join(" union all by name ")),
+        ));
     }
     out
 }
@@ -52,7 +70,11 @@ pub fn tables_for(stores: &[String]) -> Result<Vec<StoreTables>> {
     for s in stores {
         let root = resolve_store(s, cfg.as_ref())?.canonicalize()?;
         let m = trajfs_core::Manifest::load(&root)?;
-        v.push(StoreTables { name: m.store_id.clone(), root, adapter: m.adapter.name.clone() });
+        v.push(StoreTables {
+            name: m.store_id.clone(),
+            root,
+            adapter: m.adapter.name.clone(),
+        });
     }
     Ok(v)
 }
@@ -88,7 +110,10 @@ pub fn run(stores: &[String], a: SqlArgs) -> Result<i32> {
     } else if batches.is_empty() {
         println!("(no rows)");
     } else {
-        println!("{}", duckdb::arrow::util::pretty::pretty_format_batches(&batches)?);
+        println!(
+            "{}",
+            duckdb::arrow::util::pretty::pretty_format_batches(&batches)?
+        );
     }
     Ok(0)
 }
@@ -108,13 +133,25 @@ fn print_csv(batches: &[duckdb::arrow::array::RecordBatch]) -> Result<()> {
     let mut header_done = false;
     for b in batches {
         if !header_done {
-            let names: Vec<String> = b.schema().fields().iter().map(|f| csv_quote(f.name())).collect();
+            let names: Vec<String> = b
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| csv_quote(f.name()))
+                .collect();
             writeln!(out, "{}", names.join(","))?;
             header_done = true;
         }
-        let fmts: Vec<ArrayFormatter> = b.columns().iter().map(|c| ArrayFormatter::try_new(c.as_ref(), &opts)).collect::<Result<_, _>>()?;
+        let fmts: Vec<ArrayFormatter> = b
+            .columns()
+            .iter()
+            .map(|c| ArrayFormatter::try_new(c.as_ref(), &opts))
+            .collect::<Result<_, _>>()?;
         for row in 0..b.num_rows() {
-            let cells: Vec<String> = fmts.iter().map(|f| csv_quote(&f.value(row).to_string())).collect();
+            let cells: Vec<String> = fmts
+                .iter()
+                .map(|f| csv_quote(&f.value(row).to_string()))
+                .collect();
             writeln!(out, "{}", cells.join(","))?;
         }
     }
@@ -133,7 +170,10 @@ fn csv_quote(s: &str) -> String {
 #[cfg(feature = "sql")]
 mod udf {
     use anyhow::Result;
-    use duckdb::arrow::array::{Array, BinaryArray, BinaryBuilder, FixedSizeBinaryArray, LargeBinaryArray, LargeStringArray, RecordBatch, StringArray, StringBuilder};
+    use duckdb::arrow::array::{
+        Array, BinaryArray, BinaryBuilder, FixedSizeBinaryArray, LargeBinaryArray,
+        LargeStringArray, RecordBatch, StringArray, StringBuilder,
+    };
     use duckdb::arrow::datatypes::DataType;
     use duckdb::vscalar::arrow::{ArrowFunctionSignature, VArrowScalar};
     use std::sync::{Arc, Mutex, OnceLock};
@@ -181,7 +221,10 @@ mod udf {
     pub struct Text;
     impl VArrowScalar for Text {
         type State = ();
-        fn invoke(_: &(), input: RecordBatch) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
+        fn invoke(
+            _: &(),
+            input: RecordBatch,
+        ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
             let mut b = StringBuilder::new();
             for v in resolve(&input) {
                 match v {
@@ -192,14 +235,20 @@ mod udf {
             Ok(Arc::new(b.finish()))
         }
         fn signatures() -> Vec<ArrowFunctionSignature> {
-            vec![ArrowFunctionSignature::exact(vec![DataType::Binary], DataType::Utf8), ArrowFunctionSignature::exact(vec![DataType::Utf8], DataType::Utf8)]
+            vec![
+                ArrowFunctionSignature::exact(vec![DataType::Binary], DataType::Utf8),
+                ArrowFunctionSignature::exact(vec![DataType::Utf8], DataType::Utf8),
+            ]
         }
     }
 
     pub struct Blob;
     impl VArrowScalar for Blob {
         type State = ();
-        fn invoke(_: &(), input: RecordBatch) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
+        fn invoke(
+            _: &(),
+            input: RecordBatch,
+        ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
             let mut b = BinaryBuilder::new();
             for v in resolve(&input) {
                 match v {
@@ -210,7 +259,10 @@ mod udf {
             Ok(Arc::new(b.finish()))
         }
         fn signatures() -> Vec<ArrowFunctionSignature> {
-            vec![ArrowFunctionSignature::exact(vec![DataType::Binary], DataType::Binary), ArrowFunctionSignature::exact(vec![DataType::Utf8], DataType::Binary)]
+            vec![
+                ArrowFunctionSignature::exact(vec![DataType::Binary], DataType::Binary),
+                ArrowFunctionSignature::exact(vec![DataType::Utf8], DataType::Binary),
+            ]
         }
     }
 

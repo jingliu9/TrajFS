@@ -14,7 +14,11 @@ pub struct DeriveArgs {
 pub fn run(stores: &[String], a: DeriveArgs) -> Result<i32> {
     let st = one_store(stores)?;
     let cfg = crate::config::Config::find();
-    let spec = a.adapter.clone().or_else(|| cfg.as_ref().map(|c| c.file.adapter.clone())).unwrap_or_else(|| st.manifest.adapter.name.clone());
+    let spec = a
+        .adapter
+        .clone()
+        .or_else(|| cfg.as_ref().map(|c| c.file.adapter.clone()))
+        .unwrap_or_else(|| st.manifest.adapter.name.clone());
     let ad = trajfs_adapters::resolve(&spec, cfg.as_ref().map(|c| c.dir.as_path()))?;
     let dir = st.root.join("derived").join(ad.name());
     std::fs::create_dir_all(&dir)?;
@@ -29,7 +33,10 @@ pub fn run(stores: &[String], a: DeriveArgs) -> Result<i32> {
     let out = dir.join("events-0000.parquet");
     let mut ew = EventsWriter::create(&out, ad.version())?;
     let mut n_traj = 0;
-    for r in rows.iter().filter(|r| r.kind == trajfs_core::Kind::File && ad.is_trajectory(&r.path)) {
+    for r in rows
+        .iter()
+        .filter(|r| r.kind == trajfs_core::Kind::File && ad.is_trajectory(&r.path))
+    {
         let bytes = st.read_row(&mut reader, r, false)?;
         ew.push(&r.path, &ad.parse_events(&r.path, &bytes))?;
         n_traj += 1;

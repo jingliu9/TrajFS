@@ -1,4 +1,4 @@
-//! MANIFEST.json (PLAN.md §3.4).
+//! MANIFEST.json (docs/PLAN.md §3.4).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -60,10 +60,16 @@ impl Manifest {
 
     pub fn load(store: &Path) -> Result<Manifest> {
         let p = Self::path(store);
-        let text = std::fs::read_to_string(&p).with_context(|| format!("{} (not a trajfs store?)", p.display()))?;
-        let m: Manifest = serde_json::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
+        let text = std::fs::read_to_string(&p)
+            .with_context(|| format!("{} (not a trajfs store?)", p.display()))?;
+        let m: Manifest =
+            serde_json::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
         if m.format != crate::FORMAT_VERSION {
-            anyhow::bail!("store format {} is not supported (this build reads {})", m.format, crate::FORMAT_VERSION);
+            anyhow::bail!(
+                "store format {} is not supported (this build reads {})",
+                m.format,
+                crate::FORMAT_VERSION
+            );
         }
         Ok(m)
     }
@@ -82,6 +88,11 @@ impl Manifest {
     }
 
     pub fn next_pack_id(&self) -> u32 {
-        self.batches.iter().flat_map(|b| b.packs.iter().copied()).max().unwrap_or(0) + 1
+        self.batches
+            .iter()
+            .flat_map(|b| b.packs.iter().copied())
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 }

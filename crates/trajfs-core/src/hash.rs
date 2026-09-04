@@ -19,7 +19,9 @@ pub fn sha_of_file(path: &Path) -> Result<(Sha, u64)> {
     let mut buf = vec![0u8; 1 << 20];
     let mut n = 0u64;
     loop {
-        let r = f.read(&mut buf).with_context(|| format!("read {}", path.display()))?;
+        let r = f
+            .read(&mut buf)
+            .with_context(|| format!("read {}", path.display()))?;
         if r == 0 {
             break;
         }

@@ -1,4 +1,4 @@
-//! `traj bench`: the regression baseline of PLAN.md §8/§11 as one JSON document.
+//! `traj bench`: the regression baseline of docs/PLAN.md §8/§11 as one JSON document.
 
 use anyhow::Result;
 use clap::Args;
@@ -33,7 +33,10 @@ pub struct BenchArgs {
 
 fn timed(mut c: Command) -> Result<(f64, bool)> {
     let t0 = Instant::now();
-    let st = c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()?;
+    let st = c
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
     Ok((t0.elapsed().as_secs_f64(), st.success()))
 }
 
@@ -78,11 +81,16 @@ pub fn run(a: BenchArgs) -> Result<i32> {
         None => {
             let st = trajfs_core::Store::open(&store)?;
             let mut first = None;
-            st.scan_under("", false, |_| true, |row| {
-                if first.is_none() && row.kind == trajfs_core::Kind::File {
-                    first = Some(row.path.clone());
-                }
-            })?;
+            st.scan_under(
+                "",
+                false,
+                |_| true,
+                |row| {
+                    if first.is_none() && row.kind == trajfs_core::Kind::File {
+                        first = Some(row.path.clone());
+                    }
+                },
+            )?;
             first.unwrap_or_default()
         }
     };
@@ -90,11 +98,20 @@ pub fn run(a: BenchArgs) -> Result<i32> {
         ("ls_s", vec!["ls".into(), a.ls_dir.clone()]),
         ("stat_s", vec!["stat".into(), file.clone()]),
         ("cat_s", vec!["cat".into(), file.clone()]),
-        ("find_name_s", vec!["find".into(), "--name".into(), a.find_name.clone()]),
+        (
+            "find_name_s",
+            vec!["find".into(), "--name".into(), a.find_name.clone()],
+        ),
         ("du_s", vec!["du".into()]),
         ("tree_s", vec!["tree".into(), "--depth".into(), "1".into()]),
-        ("grep_s", vec!["grep".into(), "-l".into(), "-e".into(), "FAILED".into()]),
-        ("sql_count_s", vec!["sql".into(), "select count(*) from files".into()]),
+        (
+            "grep_s",
+            vec!["grep".into(), "-l".into(), "-e".into(), "FAILED".into()],
+        ),
+        (
+            "sql_count_s",
+            vec!["sql".into(), "select count(*) from files".into()],
+        ),
         ("verify_s", vec!["verify".into()]),
     ];
     for (k, args) in verbs {
@@ -106,7 +123,14 @@ pub fn run(a: BenchArgs) -> Result<i32> {
     let json = serde_json::Value::Object(r);
     match &a.out {
         Some(p) => {
-            let path = if p.is_dir() { p.join(format!("{}.json", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"))) } else { p.clone() };
+            let path = if p.is_dir() {
+                p.join(format!(
+                    "{}.json",
+                    chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                ))
+            } else {
+                p.clone()
+            };
             std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
             println!("wrote {}", path.display());
         }

@@ -1,4 +1,4 @@
-//! Adapter interface: everything runner-specific goes through this trait (PLAN.md §3.6).
+//! Adapter interface: everything runner-specific goes through this trait (docs/PLAN.md §3.6).
 //! trajfs ships only generic format parsers; a runner's adapter is a TOML file kept in the runner's own repo.
 
 use crate::events::Event;
@@ -17,7 +17,7 @@ pub trait Adapter: Send + Sync {
     fn is_trajectory(&self, _path: &str) -> bool {
         false
     }
-    /// Split a trajectory blob into envelope events (PLAN.md §3.5).
+    /// Split a trajectory blob into envelope events (docs/PLAN.md §3.5).
     fn parse_events(&self, _path: &str, _bytes: &[u8]) -> Vec<Event> {
         Vec::new()
     }

@@ -1,4 +1,6 @@
-use crate::config::{canon, check_separation, git_toplevel, is_inside, Config, ConfigFile, CONFIG_NAME};
+use crate::config::{
+    canon, check_separation, git_toplevel, is_inside, Config, ConfigFile, CONFIG_NAME,
+};
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use std::path::{Path, PathBuf};
@@ -42,10 +44,14 @@ pub fn run(a: InitArgs) -> Result<i32> {
     }
     trajfs_core::rules::Rules::resolve(&a.rules)?;
     std::fs::create_dir_all(&a.data_root)?;
-    // adapter: given, scaffolded, or asked for (PLAN.md §3.6: the adapter belongs to the target repo)
+    // adapter: given, scaffolded, or asked for (docs/PLAN.md §3.6: the adapter belongs to the target repo)
     let mut adapter = a.adapter.clone();
     let mut scaffold = a.scaffold_adapter;
-    if adapter.is_none() && !scaffold && !a.no_adapter && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if adapter.is_none()
+        && !scaffold
+        && !a.no_adapter
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         eprint!("No adapter given. Write trajfs/adapter.toml + trajfs/rules.toml templates for this repo's agent to fill in? [Y/n] ");
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
@@ -54,7 +60,10 @@ pub fn run(a: InitArgs) -> Result<i32> {
     if scaffold {
         let dir = repo.join("trajfs");
         std::fs::create_dir_all(&dir)?;
-        for (name, text) in [("adapter.toml", trajfs_adapters::declared::TEMPLATE), ("rules.toml", trajfs_adapters::declared::RULES_TEMPLATE)] {
+        for (name, text) in [
+            ("adapter.toml", trajfs_adapters::declared::TEMPLATE),
+            ("rules.toml", trajfs_adapters::declared::RULES_TEMPLATE),
+        ] {
             let p = dir.join(name);
             if !p.exists() {
                 std::fs::write(&p, text)?;
@@ -67,14 +76,29 @@ pub fn run(a: InitArgs) -> Result<i32> {
     let ad = trajfs_adapters::resolve(&adapter, Some(&repo))?;
     let mut raw_patterns = ad.raw_patterns();
     raw_patterns.extend(a.raw_patterns.iter().cloned());
-    let hook = crate::config::HookConfig { raw_patterns, ..Default::default() };
-    let cfg = Config { file: ConfigFile { data_root: canon(&a.data_root), store_root: a.store_root.clone(), adapter: adapter.clone(), rules: a.rules.clone(), hook }, dir: repo.clone() };
+    let hook = crate::config::HookConfig {
+        raw_patterns,
+        ..Default::default()
+    };
+    let cfg = Config {
+        file: ConfigFile {
+            data_root: canon(&a.data_root),
+            store_root: a.store_root.clone(),
+            adapter: adapter.clone(),
+            rules: a.rules.clone(),
+            hook,
+        },
+        dir: repo.clone(),
+    };
     check_separation(&cfg, None, None, true)?;
     cfg.save()?;
     let store_root = cfg.store_root();
     std::fs::create_dir_all(&store_root)?;
     std::fs::write(store_root.join(".gitkeep"), "")?;
-    std::fs::write(store_root.join(".gitattributes"), "*.pack -diff -delta binary\n*.parquet -diff -delta binary\n")?;
+    std::fs::write(
+        store_root.join(".gitattributes"),
+        "*.pack -diff -delta binary\n*.parquet -diff -delta binary\n",
+    )?;
     let ignore = a.data_root.join(".gitignore");
     if !ignore.exists() {
         std::fs::write(&ignore, "# trajfs data_root: raw run trees are never committed; pack them with `traj pack`.\n*\n")?;
@@ -83,7 +107,15 @@ pub fn run(a: InitArgs) -> Result<i32> {
     if !a.no_skill {
         crate::cmd::skill::export_all(&cfg)?;
     }
-    println!("initialised {} (data_root {}, store_root {}, adapter {}, rules {}, {} hook patterns)", repo.join(CONFIG_NAME).display(), cfg.data_root().display(), store_root.display(), adapter, a.rules, cfg.file.hook.raw_patterns.len());
+    println!(
+        "initialised {} (data_root {}, store_root {}, adapter {}, rules {}, {} hook patterns)",
+        repo.join(CONFIG_NAME).display(),
+        cfg.data_root().display(),
+        store_root.display(),
+        adapter,
+        a.rules,
+        cfg.file.hook.raw_patterns.len()
+    );
     println!("next: traj doctor; then commit {CONFIG_NAME}, {}/.gitkeep, .claude/skills/traj, AGENTS.md{}", a.store_root.display(), if scaffold { ", trajfs/" } else { "" });
     Ok(0)
 }
@@ -96,30 +128,57 @@ pub fn install_hook(repo: &Path, force: bool) -> Result<()> {
     let hook = hook_path(repo);
     let me = std::env::current_exe()?;
     if let Ok(md) = std::fs::symlink_metadata(&hook) {
-        let is_ours = md.file_type().is_symlink() && std::fs::read_link(&hook).map(|t| t.file_name().map(|n| n == "traj").unwrap_or(false)).unwrap_or(false);
+        let is_ours = md.file_type().is_symlink()
+            && std::fs::read_link(&hook)
+                .map(|t| t.file_name().map(|n| n == "traj").unwrap_or(false))
+                .unwrap_or(false);
         if !is_ours && !force {
-            bail!("{} exists and is not a traj hook; pass --force to replace it", hook.display());
+            bail!(
+                "{} exists and is not a traj hook; pass --force to replace it",
+                hook.display()
+            );
         }
         std::fs::remove_file(&hook)?;
     }
     std::fs::create_dir_all(hook.parent().unwrap())?;
-    std::os::unix::fs::symlink(&me, &hook).with_context(|| format!("symlink {} -> {}", hook.display(), me.display()))?;
+    std::os::unix::fs::symlink(&me, &hook)
+        .with_context(|| format!("symlink {} -> {}", hook.display(), me.display()))?;
     Ok(())
 }
 
 pub fn doctor() -> Result<i32> {
     let mut problems = 0;
     let Some(cfg) = Config::find() else {
-        println!("config:      none (no {CONFIG_NAME} above {}); run `traj init --data-root <abs dir>`", std::env::current_dir()?.display());
+        println!(
+            "config:      none (no {CONFIG_NAME} above {}); run `traj init --data-root <abs dir>`",
+            std::env::current_dir()?.display()
+        );
         return Ok(1);
     };
     println!("config:      {}", cfg.dir.join(CONFIG_NAME).display());
-    println!("data_root:   {}{}", cfg.data_root().display(), if cfg.data_root().is_dir() { "" } else { "  (MISSING)" });
+    println!(
+        "data_root:   {}{}",
+        cfg.data_root().display(),
+        if cfg.data_root().is_dir() {
+            ""
+        } else {
+            "  (MISSING)"
+        }
+    );
     println!("store_root:  {}", cfg.store_root().display());
     match cfg.adapter() {
-        Ok(ad) => println!("adapter:     {} (name {}, v{}, {} hook patterns)", cfg.file.adapter, ad.name(), ad.version(), cfg.file.hook.raw_patterns.len()),
+        Ok(ad) => println!(
+            "adapter:     {} (name {}, v{}, {} hook patterns)",
+            cfg.file.adapter,
+            ad.name(),
+            ad.version(),
+            cfg.file.hook.raw_patterns.len()
+        ),
         Err(e) => {
-            println!("adapter:     PROBLEM {} cannot be loaded: {e:#}", cfg.file.adapter);
+            println!(
+                "adapter:     PROBLEM {} cannot be loaded: {e:#}",
+                cfg.file.adapter
+            );
             problems += 1;
         }
     }
@@ -141,27 +200,45 @@ pub fn doctor() -> Result<i32> {
     match std::fs::read_link(&hook) {
         Ok(t) if t.exists() => println!("hook:        {} -> {}", hook.display(), t.display()),
         Ok(t) => {
-            println!("hook:        PROBLEM symlink target {} does not exist", t.display());
+            println!(
+                "hook:        PROBLEM symlink target {} does not exist",
+                t.display()
+            );
             problems += 1;
         }
         Err(_) => {
-            println!("hook:        PROBLEM {} is not the traj binary (run `traj init` again)", hook.display());
+            println!(
+                "hook:        PROBLEM {} is not the traj binary (run `traj init` again)",
+                hook.display()
+            );
             problems += 1;
         }
     }
-    let skill = cfg.dir.join(".claude").join("skills").join("traj").join("SKILL.md");
+    let skill = cfg
+        .dir
+        .join(".claude")
+        .join("skills")
+        .join("traj")
+        .join("SKILL.md");
     match std::fs::read_to_string(&skill) {
         Ok(text) => {
             let v = crate::cmd::skill::version_in(&text);
             if v.as_deref() == Some(crate::VERSION) {
-                println!("skill:       {} (version {})", skill.display(), crate::VERSION);
+                println!(
+                    "skill:       {} (version {})",
+                    skill.display(),
+                    crate::VERSION
+                );
             } else {
                 println!("skill:       PROBLEM version {} differs from binary {}; run `traj skill export`", v.unwrap_or_else(|| "?".into()), crate::VERSION);
                 problems += 1;
             }
         }
         Err(_) => {
-            println!("skill:       PROBLEM {} missing; run `traj skill export`", skill.display());
+            println!(
+                "skill:       PROBLEM {} missing; run `traj skill export`",
+                skill.display()
+            );
             problems += 1;
         }
     }
@@ -184,6 +261,13 @@ pub fn doctor() -> Result<i32> {
     }
     println!("stores:      {n} under {}", cfg.store_root().display());
     let _ = is_inside;
-    println!("{}", if problems == 0 { "OK" } else { "PROBLEMS: see above" });
+    println!(
+        "{}",
+        if problems == 0 {
+            "OK"
+        } else {
+            "PROBLEMS: see above"
+        }
+    );
     Ok(if problems == 0 { 0 } else { 1 })
 }

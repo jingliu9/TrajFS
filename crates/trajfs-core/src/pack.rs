@@ -75,10 +75,18 @@ impl PackWriter {
             return Ok(());
         }
         if bytes.len() <= CHUNK_BYTES {
-            self.push_item(Item { sha, part: 0, bytes: bytes.to_vec() })?;
+            self.push_item(Item {
+                sha,
+                part: 0,
+                bytes: bytes.to_vec(),
+            })?;
         } else {
             for (i, part) in bytes.chunks(CHUNK_BYTES).enumerate() {
-                self.push_item(Item { sha, part: i as u16, bytes: part.to_vec() })?;
+                self.push_item(Item {
+                    sha,
+                    part: i as u16,
+                    bytes: part.to_vec(),
+                })?;
             }
         }
         Ok(())
@@ -102,8 +110,14 @@ impl PackWriter {
                 break;
             }
             buf.truncate(n);
-            self.push_item(Item { sha, part, bytes: buf })?;
-            part = part.checked_add(1).context("blob has more than 65535 parts")?;
+            self.push_item(Item {
+                sha,
+                part,
+                bytes: buf,
+            })?;
+            part = part
+                .checked_add(1)
+                .context("blob has more than 65535 parts")?;
             if n < CHUNK_BYTES {
                 break;
             }
@@ -215,8 +229,13 @@ impl PackWriter {
                     let mut items = Vec::with_capacity(g.len());
                     for &i in g {
                         let (sha, path, _) = &blobs[i];
-                        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-                        items.push(Item { sha: *sha, part: 0, bytes });
+                        let bytes = std::fs::read(path)
+                            .with_context(|| format!("read {}", path.display()))?;
+                        items.push(Item {
+                            sha: *sha,
+                            part: 0,
+                            bytes,
+                        });
                     }
                     let chunk = build_chunk(&items);
                     let frame = zstd::bulk::compress(&chunk.raw, ZSTD_LEVEL)?;
@@ -266,7 +285,12 @@ pub struct PackReader {
 
 impl PackReader {
     pub fn new(packs_dir: &Path) -> Self {
-        Self { packs_dir: packs_dir.to_path_buf(), files: HashMap::new(), cache: Vec::new(), cache_max: 8 }
+        Self {
+            packs_dir: packs_dir.to_path_buf(),
+            files: HashMap::new(),
+            cache: Vec::new(),
+            cache_max: 8,
+        }
     }
 
     fn file(&mut self, pack: u32) -> Result<&File> {
@@ -275,7 +299,8 @@ impl PackReader {
             let mut f = File::open(&p).with_context(|| format!("open pack {}", p.display()))?;
             let mut magic = [0u8; 9];
             f.seek(SeekFrom::Start(0))?;
-            f.read_exact(&mut magic).with_context(|| format!("pack {} is too short", p.display()))?;
+            f.read_exact(&mut magic)
+                .with_context(|| format!("pack {} is too short", p.display()))?;
             if &magic != MAGIC {
                 bail!("pack {} has a bad magic", p.display());
             }
@@ -293,9 +318,14 @@ impl PackReader {
             return Ok(&self.cache.last().unwrap().1);
         }
         let mut buf = vec![0u8; chunk_len as usize];
-        self.file(pack)?.read_exact_at(&mut buf, chunk_offset as u64).with_context(|| {
-            format!("read frame at {}+{} of pack {}", chunk_offset, chunk_len, pack)
-        })?;
+        self.file(pack)?
+            .read_exact_at(&mut buf, chunk_offset as u64)
+            .with_context(|| {
+                format!(
+                    "read frame at {}+{} of pack {}",
+                    chunk_offset, chunk_len, pack
+                )
+            })?;
         let raw = zstd::bulk::decompress(&buf, CHUNK_BYTES * 2 + 1024)
             .with_context(|| format!("decompress frame at {} of pack {}", chunk_offset, pack))?;
         if self.cache.len() >= self.cache_max {
@@ -314,7 +344,13 @@ impl PackReader {
             let start = l.offset as usize;
             let end = start + l.size as usize;
             if end > raw.len() {
-                bail!("index points outside frame ({}+{} > {}) in pack {}", start, l.size, raw.len(), l.pack);
+                bail!(
+                    "index points outside frame ({}+{} > {}) in pack {}",
+                    start,
+                    l.size,
+                    raw.len(),
+                    l.pack
+                );
             }
             out.extend_from_slice(&raw[start..end]);
         }
@@ -378,7 +414,11 @@ mod tests {
         let l = by_sha[&shas[0]][0];
         let data = std::fs::read(dir.path().join(pack_name(1))).unwrap();
         assert_eq!(&data[..9], MAGIC);
-        let raw = zstd::bulk::decompress(&data[l.chunk_offset as usize..(l.chunk_offset + l.chunk_len as i64) as usize], 1 << 22).unwrap();
+        let raw = zstd::bulk::decompress(
+            &data[l.chunk_offset as usize..(l.chunk_offset + l.chunk_len as i64) as usize],
+            1 << 22,
+        )
+        .unwrap();
         assert_eq!(&raw[l.offset as usize..l.offset as usize + 5], b"hello");
     }
 
@@ -410,9 +450,18 @@ mod tests {
             w.add_bytes(sha_of_bytes(&b), &b).unwrap();
         }
         let (rows, packs, _, _) = w.finish().unwrap();
-        assert_eq!(packs, vec![1, 2], "100 MiB of noise must seal pack 1 at 64 MiB and continue in pack 2");
-        let len1 = std::fs::metadata(dir.path().join(pack_name(1))).unwrap().len();
-        assert!(len1 >= PACK_SEAL_BYTES && len1 < PACK_SEAL_BYTES + (CHUNK_BYTES as u64) + 1024, "{len1}");
+        assert_eq!(
+            packs,
+            vec![1, 2],
+            "100 MiB of noise must seal pack 1 at 64 MiB and continue in pack 2"
+        );
+        let len1 = std::fs::metadata(dir.path().join(pack_name(1)))
+            .unwrap()
+            .len();
+        assert!(
+            len1 >= PACK_SEAL_BYTES && len1 < PACK_SEAL_BYTES + (CHUNK_BYTES as u64) + 1024,
+            "{len1}"
+        );
         let parts: Vec<&IndexRow> = rows.iter().filter(|r| r.sha == big_sha).collect();
         assert_eq!(parts.len(), 100);
         assert!(parts.iter().any(|r| r.loc.pack == 1) && parts.iter().any(|r| r.loc.pack == 2));
@@ -434,9 +483,16 @@ mod tests {
         let frame = &data[l.chunk_offset as usize..(l.chunk_offset + l.chunk_len as i64) as usize];
         let fpath = dir.path().join("frame.zst");
         std::fs::write(&fpath, frame).unwrap();
-        if let Ok(out) = std::process::Command::new("zstd").arg("-dc").arg(&fpath).output() {
+        if let Ok(out) = std::process::Command::new("zstd")
+            .arg("-dc")
+            .arg(&fpath)
+            .output()
+        {
             assert!(out.status.success());
-            assert_eq!(&out.stdout[l.offset as usize..l.offset as usize + l.size as usize], &big[3 * CHUNK_BYTES..4 * CHUNK_BYTES]);
+            assert_eq!(
+                &out.stdout[l.offset as usize..l.offset as usize + l.size as usize],
+                &big[3 * CHUNK_BYTES..4 * CHUNK_BYTES]
+            );
         }
     }
 }

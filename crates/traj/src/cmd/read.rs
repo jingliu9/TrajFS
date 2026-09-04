@@ -20,7 +20,9 @@ pub fn cat(stores: &[String], a: CatArgs) -> Result<i32> {
     let mut out = stdout.lock();
     for p in &a.paths {
         let p = norm(p);
-        let Some(r) = st.stat(&p)? else { bail!("{p}: not in the store") };
+        let Some(r) = st.stat(&p)? else {
+            bail!("{p}: not in the store")
+        };
         let bytes = st.read_row(&mut reader, &r, !a.no_verify)?;
         out.write_all(&bytes)?;
     }
@@ -59,7 +61,9 @@ pub struct EditArgs {
 pub fn edit(stores: &[String], a: EditArgs) -> Result<i32> {
     let st = one_store(stores)?;
     let p = norm(&a.path);
-    let Some(r) = st.stat(&p)? else { bail!("{p}: not in the store") };
+    let Some(r) = st.stat(&p)? else {
+        bail!("{p}: not in the store")
+    };
     let mut reader = st.reader();
     let original = st.read_row(&mut reader, &r, true)?;
     let tmpdir = std::env::temp_dir().join(format!("traj-edit-{}", std::process::id()));
@@ -67,7 +71,10 @@ pub fn edit(stores: &[String], a: EditArgs) -> Result<i32> {
     let tmp = tmpdir.join(r.name());
     std::fs::write(&tmp, &original)?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    let status = std::process::Command::new(&editor).arg(&tmp).status().with_context(|| format!("run {editor}"))?;
+    let status = std::process::Command::new(&editor)
+        .arg(&tmp)
+        .status()
+        .with_context(|| format!("run {editor}"))?;
     if !status.success() {
         bail!("{editor} exited with {status}");
     }
@@ -78,8 +85,16 @@ pub fn edit(stores: &[String], a: EditArgs) -> Result<i32> {
         let a_s = String::from_utf8_lossy(&original);
         let b_s = String::from_utf8_lossy(&edited);
         let diff = similar::TextDiff::from_lines(&a_s, &b_s);
-        print!("{}", diff.unified_diff().context_radius(3).header(&format!("store/{p}"), &tmp.display().to_string()));
-        eprintln!("edited copy left at {} (the store is read-only)", tmp.display());
+        print!(
+            "{}",
+            diff.unified_diff()
+                .context_radius(3)
+                .header(&format!("store/{p}"), &tmp.display().to_string())
+        );
+        eprintln!(
+            "edited copy left at {} (the store is read-only)",
+            tmp.display()
+        );
     }
     Ok(0)
 }

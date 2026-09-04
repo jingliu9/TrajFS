@@ -1,4 +1,4 @@
-//! Reading a store: catalog queries, blob access, extract, verify (PLAN.md §5).
+//! Reading a store: catalog queries, blob access, extract, verify (docs/PLAN.md §5).
 
 use crate::catalog::{self, DirRow};
 use crate::hash::sha_of_bytes;
@@ -70,13 +70,18 @@ pub struct VerifyReport {
 
 impl VerifyReport {
     pub fn ok(&self) -> bool {
-        self.missing_blobs.is_empty() && self.bad_parts.is_empty() && self.missing_packs.is_empty() && self.corrupt.is_empty()
+        self.missing_blobs.is_empty()
+            && self.bad_parts.is_empty()
+            && self.missing_packs.is_empty()
+            && self.corrupt.is_empty()
     }
 }
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
-        let root = root.canonicalize().with_context(|| format!("store {}", root.display()))?;
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("store {}", root.display()))?;
         let manifest = Manifest::load(&root)?;
         Ok(Store {
             files_segments: segments(&root.join("catalog"), "files-")?,
@@ -119,13 +124,18 @@ impl Store {
         let multi = self.files_segments.len() > 1;
         let mut v = Vec::new();
         for seg in &self.files_segments {
-            catalog::scan_files(seg, range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())), with_attrs, |r| {
-                if multi {
-                    m.insert(r.path.as_bytes().to_vec(), r);
-                } else {
-                    v.push(r);
-                }
-            })?;
+            catalog::scan_files(
+                seg,
+                range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())),
+                with_attrs,
+                |r| {
+                    if multi {
+                        m.insert(r.path.as_bytes().to_vec(), r);
+                    } else {
+                        v.push(r);
+                    }
+                },
+            )?;
         }
         if multi {
             Ok(m.into_values().collect())
@@ -136,7 +146,13 @@ impl Store {
 
     /// Stream rows below `dir` whose path passes `pre`, newest batch winning for duplicate paths.
     /// Single-segment stores stream without buffering; multi-segment stores buffer to resolve duplicates.
-    pub fn scan_under(&self, dir: &str, with_attrs: bool, pre: impl Fn(&str) -> bool, mut f: impl FnMut(FileRow)) -> Result<()> {
+    pub fn scan_under(
+        &self,
+        dir: &str,
+        with_attrs: bool,
+        pre: impl Fn(&str) -> bool,
+        mut f: impl FnMut(FileRow),
+    ) -> Result<()> {
         let range = subtree_range(dir);
         let r = range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice()));
         if self.files_segments.len() <= 1 {
@@ -172,29 +188,43 @@ impl Store {
         let mut found: Option<FileRow> = None;
         for seg in &self.files_segments {
             // only the matching row is materialised; the row group is located through the path statistics
-            catalog::scan_files_filtered(seg, Some((&lo, &hi)), true, |p| p == path, |r| found = Some(r))?;
+            catalog::scan_files_filtered(
+                seg,
+                Some((&lo, &hi)),
+                true,
+                |p| p == path,
+                |r| found = Some(r),
+            )?;
         }
         Ok(found)
     }
 
     /// Direct children of `dir`: (subdirectories, files). Directory counts are summed over batches.
     pub fn children(&self, dir: &str) -> Result<(Vec<DirEntry>, Vec<FileRow>)> {
-        let depth = if dir.is_empty() { 0 } else { dir.matches('/').count() as u16 + 1 };
+        let depth = if dir.is_empty() {
+            0
+        } else {
+            dir.matches('/').count() as u16 + 1
+        };
         let range = subtree_range(dir);
         let mut subs: BTreeMap<String, DirEntry> = BTreeMap::new();
         for seg in &self.dirs_segments {
-            catalog::scan_dirs(seg, range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())), |d| {
-                if d.depth == depth + 1 && d.parent() == dir {
-                    let e = subs.entry(d.dir.clone()).or_insert_with(|| DirEntry {
-                        name: d.name().to_string(),
-                        dir: d.dir.clone(),
-                        ..Default::default()
-                    });
-                    e.n_files += d.n_files;
-                    e.n_dirs += d.n_dirs;
-                    e.bytes += d.bytes;
-                }
-            })?;
+            catalog::scan_dirs(
+                seg,
+                range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())),
+                |d| {
+                    if d.depth == depth + 1 && d.parent() == dir {
+                        let e = subs.entry(d.dir.clone()).or_insert_with(|| DirEntry {
+                            name: d.name().to_string(),
+                            dir: d.dir.clone(),
+                            ..Default::default()
+                        });
+                        e.n_files += d.n_files;
+                        e.n_dirs += d.n_dirs;
+                        e.bytes += d.bytes;
+                    }
+                },
+            )?;
         }
         let mut files: Vec<FileRow> = Vec::new();
         if self.files_segments.len() <= 1 {
@@ -222,7 +252,11 @@ impl Store {
         for seg in &self.dirs_segments {
             catalog::scan_dirs(seg, Some((&lo, &hi)), |d| {
                 if d.dir == dir {
-                    let a = acc.get_or_insert_with(|| DirRow { dir: d.dir.clone(), depth: d.depth, ..Default::default() });
+                    let a = acc.get_or_insert_with(|| DirRow {
+                        dir: d.dir.clone(),
+                        depth: d.depth,
+                        ..Default::default()
+                    });
                     a.n_files += d.n_files;
                     a.n_dirs += d.n_dirs;
                     a.bytes += d.bytes;
@@ -237,12 +271,20 @@ impl Store {
         let range = subtree_range(dir);
         let mut m: BTreeMap<String, DirRow> = BTreeMap::new();
         for seg in &self.dirs_segments {
-            catalog::scan_dirs(seg, range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())), |d| {
-                let e = m.entry(d.dir.clone()).or_insert_with(|| DirRow { dir: d.dir.clone(), depth: d.depth, ..Default::default() });
-                e.n_files += d.n_files;
-                e.n_dirs += d.n_dirs;
-                e.bytes += d.bytes;
-            })?;
+            catalog::scan_dirs(
+                seg,
+                range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())),
+                |d| {
+                    let e = m.entry(d.dir.clone()).or_insert_with(|| DirRow {
+                        dir: d.dir.clone(),
+                        depth: d.depth,
+                        ..Default::default()
+                    });
+                    e.n_files += d.n_files;
+                    e.n_dirs += d.n_dirs;
+                    e.bytes += d.bytes;
+                },
+            )?;
         }
         Ok(m.into_values().collect())
     }
@@ -255,7 +297,12 @@ impl Store {
     }
 
     /// Bytes of a catalog row (symlink: its target; empty: empty). Verifies the sha when `verify`.
-    pub fn read_row(&self, reader: &mut PackReader, row: &FileRow, verify: bool) -> Result<Vec<u8>> {
+    pub fn read_row(
+        &self,
+        reader: &mut PackReader,
+        row: &FileRow,
+        verify: bool,
+    ) -> Result<Vec<u8>> {
         if row.kind == Kind::Empty {
             return Ok(Vec::new());
         }
@@ -271,7 +318,14 @@ impl Store {
     }
 
     /// Materialise everything below `prefix` (a file or a directory) into `dst`.
-    pub fn extract(&self, prefix: &str, dst: &Path, hardlink_dedupe: bool, set_mtime: bool, verify: bool) -> Result<u64> {
+    pub fn extract(
+        &self,
+        prefix: &str,
+        dst: &Path,
+        hardlink_dedupe: bool,
+        set_mtime: bool,
+        verify: bool,
+    ) -> Result<u64> {
         let rows = if let Some(r) = self.stat(prefix)? {
             vec![r]
         } else {
@@ -281,13 +335,21 @@ impl Store {
             }
             rows
         };
-        let strip = if prefix.is_empty() { 0 } else { prefix.len() + 1 };
+        let strip = if prefix.is_empty() {
+            0
+        } else {
+            prefix.len() + 1
+        };
         let mut reader = self.reader();
         // hard links share the inode, hence the mode: only identical (content, mode) pairs may be linked
         let mut first_path: HashMap<(Sha, u16), PathBuf> = HashMap::new();
         let mut n = 0u64;
         for r in &rows {
-            let rel = if rows.len() == 1 && r.path == prefix { crate::basename_of(&r.path).to_string() } else { r.path[strip..].to_string() };
+            let rel = if rows.len() == 1 && r.path == prefix {
+                crate::basename_of(&r.path).to_string()
+            } else {
+                r.path[strip..].to_string()
+            };
             let out = dst.join(&rel);
             if let Some(p) = out.parent() {
                 std::fs::create_dir_all(p)?;
@@ -295,7 +357,8 @@ impl Store {
             match r.kind {
                 Kind::Symlink => {
                     let target = self.read_row(&mut reader, r, verify)?;
-                    let target = String::from_utf8(target).context("symlink target is not UTF-8")?;
+                    let target =
+                        String::from_utf8(target).context("symlink target is not UTF-8")?;
                     let _ = std::fs::remove_file(&out);
                     std::os::unix::fs::symlink(target, &out)?;
                 }
@@ -327,7 +390,8 @@ impl Store {
                 }
             }
             if set_mtime && r.kind != Kind::Symlink {
-                let t = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(r.mtime_ns.max(0) as u64);
+                let t = std::time::UNIX_EPOCH
+                    + std::time::Duration::from_nanos(r.mtime_ns.max(0) as u64);
                 let f = std::fs::File::open(&out)?;
                 f.set_modified(t)?;
             }
@@ -345,7 +409,12 @@ impl Store {
         for (sha, parts) in index {
             for (i, l) in parts.iter().enumerate() {
                 if l.part as usize != i {
-                    rep.bad_parts.push(format!("{}: part {} at position {}", hex::encode(sha), l.part, i));
+                    rep.bad_parts.push(format!(
+                        "{}: part {} at position {}",
+                        hex::encode(sha),
+                        l.part,
+                        i
+                    ));
                 }
                 let len = match pack_len.get(&l.pack) {
                     Some(v) => *v,
@@ -360,7 +429,11 @@ impl Store {
                     }
                 };
                 if len > 0 && (l.chunk_offset as u64 + l.chunk_len as u64) > len {
-                    rep.bad_parts.push(format!("{}: frame beyond the end of pack {}", hex::encode(sha), l.pack));
+                    rep.bad_parts.push(format!(
+                        "{}: frame beyond the end of pack {}",
+                        hex::encode(sha),
+                        l.pack
+                    ));
                 }
             }
         }
@@ -379,7 +452,10 @@ impl Store {
                 if let Some(parts) = index.get(&r.sha) {
                     let s: i64 = parts.iter().map(|l| l.size).sum();
                     if s != r.size {
-                        rep.bad_parts.push(format!("{}: parts sum to {} bytes, catalog says {}", r.path, s, r.size));
+                        rep.bad_parts.push(format!(
+                            "{}: parts sum to {} bytes, catalog says {}",
+                            r.path, s, r.size
+                        ));
                     }
                     shas_needed.insert(r.sha);
                 } else {
@@ -411,7 +487,10 @@ impl Store {
     }
 
     /// Paths (in catalog) for a given sha, for mapping grep hits back.
-    pub fn paths_by_sha(&self, filter: impl Fn(&FileRow) -> bool) -> Result<HashMap<Sha, Vec<String>>> {
+    pub fn paths_by_sha(
+        &self,
+        filter: impl Fn(&FileRow) -> bool,
+    ) -> Result<HashMap<Sha, Vec<String>>> {
         let mut m: HashMap<Sha, Vec<String>> = HashMap::new();
         self.for_each_file(true, |r| {
             if r.kind != Kind::Empty && filter(&r) {

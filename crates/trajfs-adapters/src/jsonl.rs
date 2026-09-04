@@ -26,11 +26,14 @@ pub fn parse(bytes: &[u8]) -> Vec<Event> {
             out.push(unparsed(seq, line));
             return;
         };
-        let ts = ["timestamp", "ts", "time", "created_at"].iter().find_map(|k| ts_us(v.get(*k)));
+        let ts = ["timestamp", "ts", "time", "created_at"]
+            .iter()
+            .find_map(|k| ts_us(v.get(*k)));
         out.push(Event {
             seq,
             ts_us: ts,
-            r#type: str_of(&v, &["type", "event", "kind", "event_type"]).unwrap_or_else(|| "_untyped".into()),
+            r#type: str_of(&v, &["type", "event", "kind", "event_type"])
+                .unwrap_or_else(|| "_untyped".into()),
             id: str_of(&v, &["id", "uuid", "event_id"]),
             parent_id: str_of(&v, &["parentId", "parent_id", "parentUuid", "parent"]),
             actor: str_of(&v, &["role", "actor", "author"]),

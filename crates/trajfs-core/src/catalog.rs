@@ -1,20 +1,20 @@
-//! Parquet catalog: `files`, `dirs`, `excluded` and the pack `index` (PLAN.md §3.1–§3.3).
+//! Parquet catalog: `files`, `dirs`, `excluded` and the pack `index` (docs/PLAN.md §3.1–§3.3).
 //! Segments are sorted by path so readers can prune row groups with the column statistics.
 
 use crate::pack::{IndexRow, Loc};
 use crate::{FileRow, Kind, Sha, ROW_GROUP};
 use anyhow::{Context, Result};
 use arrow::array::{
-    Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, Int64Builder, MapBuilder, StringBuilder,
-    UInt16Builder, UInt32Builder, UInt8Builder,
+    Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, Int64Builder, MapBuilder,
+    StringBuilder, UInt16Builder, UInt32Builder, UInt8Builder,
 };
 use arrow::datatypes::{Int32Type, Int64Type, Schema, UInt16Type, UInt32Type, UInt8Type};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::data_type::AsBytes;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::statistics::Statistics;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -40,7 +40,11 @@ struct LazyWriter {
 
 impl LazyWriter {
     fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), writer: None, rows: 0 }
+        Self {
+            path: path.to_path_buf(),
+            writer: None,
+            rows: 0,
+        }
     }
     fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         if self.writer.is_none() {
@@ -153,7 +157,12 @@ impl FilesWriter {
 }
 
 /// Row-group pruning helper: indices of row groups whose `path` statistics intersect `[lo, hi)`.
-fn prune(builder: &ParquetRecordBatchReaderBuilder<File>, col: &str, lo: &[u8], hi: &[u8]) -> Vec<usize> {
+fn prune(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+    col: &str,
+    lo: &[u8],
+    hi: &[u8],
+) -> Vec<usize> {
     let schema = builder.parquet_schema();
     let idx = schema.columns().iter().position(|c| c.name() == col);
     let mut out = Vec::new();
@@ -175,7 +184,11 @@ fn prune(builder: &ParquetRecordBatchReaderBuilder<File>, col: &str, lo: &[u8], 
 /// Row groups that can hold a *direct* child of `dir`: a group whose min and max paths both lie below the same
 /// subdirectory of `dir` holds none, because direct children sort outside such a group.
 fn prune_direct(builder: &ParquetRecordBatchReaderBuilder<File>, dir: &str) -> Vec<usize> {
-    let prefix: Vec<u8> = if dir.is_empty() { Vec::new() } else { format!("{dir}/").into_bytes() };
+    let prefix: Vec<u8> = if dir.is_empty() {
+        Vec::new()
+    } else {
+        format!("{dir}/").into_bytes()
+    };
     let first_component_dir = |p: &[u8]| -> Option<Vec<u8>> {
         // Some(component) when p is under prefix and has a '/' after its first component
         let rest = p.strip_prefix(prefix.as_slice())?;
@@ -219,7 +232,12 @@ fn prune_direct(builder: &ParquetRecordBatchReaderBuilder<File>, dir: &str) -> V
 }
 
 /// Direct children (files) of `dir` in one segment, materialising only matching rows.
-pub fn scan_direct_children(segment: &Path, dir: &str, with_attrs: bool, mut f: impl FnMut(FileRow)) -> Result<()> {
+pub fn scan_direct_children(
+    segment: &Path,
+    dir: &str,
+    with_attrs: bool,
+    mut f: impl FnMut(FileRow),
+) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let groups = prune_direct(&builder, dir);
@@ -231,7 +249,11 @@ pub fn scan_direct_children(segment: &Path, dir: &str, with_attrs: bool, mut f: 
         cols.push("attrs");
     }
     let mask = ProjectionMask::columns(builder.parquet_schema(), cols.iter().copied());
-    let reader = builder.with_row_groups(groups).with_projection(mask).with_batch_size(ROW_GROUP).build()?;
+    let reader = builder
+        .with_row_groups(groups)
+        .with_projection(mask)
+        .with_batch_size(ROW_GROUP)
+        .build()?;
     for batch in reader {
         let batch = batch?;
         decode_rows(&batch, with_attrs, |p| crate::parent_of(p) == dir, &mut f);
@@ -272,7 +294,10 @@ pub fn scan_files_filtered(
         cols.push("attrs");
     }
     let mask = ProjectionMask::columns(builder.parquet_schema(), cols.iter().copied());
-    let reader = builder.with_projection(mask).with_batch_size(ROW_GROUP).build()?;
+    let reader = builder
+        .with_projection(mask)
+        .with_batch_size(ROW_GROUP)
+        .build()?;
     for batch in reader {
         let batch = batch?;
         let pre_range = |p: &str| {
@@ -289,8 +314,17 @@ pub fn scan_files_filtered(
     Ok(())
 }
 
-fn decode_rows(batch: &RecordBatch, with_attrs: bool, pre: impl Fn(&str) -> bool, f: &mut impl FnMut(FileRow)) {
-    let by = |n: &str| batch.column_by_name(n).unwrap_or_else(|| panic!("column {n}"));
+fn decode_rows(
+    batch: &RecordBatch,
+    with_attrs: bool,
+    pre: impl Fn(&str) -> bool,
+    f: &mut impl FnMut(FileRow),
+) {
+    let by = |n: &str| {
+        batch
+            .column_by_name(n)
+            .unwrap_or_else(|| panic!("column {n}"))
+    };
     let path = by("path").as_string::<i32>();
     let kind = by("kind").as_primitive::<UInt8Type>();
     let mode = by("mode").as_primitive::<UInt16Type>();
@@ -298,7 +332,11 @@ fn decode_rows(batch: &RecordBatch, with_attrs: bool, pre: impl Fn(&str) -> bool
     let sha = by("sha").as_fixed_size_binary();
     let mtime = by("mtime_ns").as_primitive::<Int64Type>();
     let bt = by("batch").as_primitive::<UInt32Type>();
-    let attrs = if with_attrs { Some(by("attrs").as_map()) } else { None };
+    let attrs = if with_attrs {
+        Some(by("attrs").as_map())
+    } else {
+        None
+    };
     for i in 0..batch.num_rows() {
         let p = path.value(i);
         if !pre(p) {
@@ -358,7 +396,11 @@ pub fn dirs_from_files<'a>(rows: impl Iterator<Item = &'a FileRow>, batch: u32) 
         loop {
             let e = m.entry(cur.clone()).or_insert_with(|| DirRow {
                 dir: cur.clone(),
-                depth: if cur.is_empty() { 0 } else { cur.matches('/').count() as u16 + 1 },
+                depth: if cur.is_empty() {
+                    0
+                } else {
+                    cur.matches('/').count() as u16 + 1
+                },
                 batch,
                 ..Default::default()
             });
@@ -373,7 +415,11 @@ pub fn dirs_from_files<'a>(rows: impl Iterator<Item = &'a FileRow>, batch: u32) 
             if seen_dirs.insert(cur.clone()) {
                 let pe = m.entry(parent.clone()).or_insert_with(|| DirRow {
                     dir: parent.clone(),
-                    depth: if parent.is_empty() { 0 } else { parent.matches('/').count() as u16 + 1 },
+                    depth: if parent.is_empty() {
+                        0
+                    } else {
+                        parent.matches('/').count() as u16 + 1
+                    },
                     batch,
                     ..Default::default()
                 });
@@ -421,7 +467,11 @@ pub fn write_dirs(path: &Path, rows: &[DirRow]) -> Result<()> {
 }
 
 /// Scan a `dirs` segment; `range` prunes on the `dir` column like `scan_files` does on `path`.
-pub fn scan_dirs(segment: &Path, range: Option<(&[u8], &[u8])>, mut f: impl FnMut(DirRow)) -> Result<()> {
+pub fn scan_dirs(
+    segment: &Path,
+    range: Option<(&[u8], &[u8])>,
+    mut f: impl FnMut(DirRow),
+) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     if let Some((lo, hi)) = range {
@@ -434,7 +484,11 @@ pub fn scan_dirs(segment: &Path, range: Option<(&[u8], &[u8])>, mut f: impl FnMu
     let reader = builder.with_batch_size(ROW_GROUP).build()?;
     for batch in reader {
         let batch = batch?;
-        let by = |n: &str| batch.column_by_name(n).unwrap_or_else(|| panic!("column {n}"));
+        let by = |n: &str| {
+            batch
+                .column_by_name(n)
+                .unwrap_or_else(|| panic!("column {n}"))
+        };
         let dir = by("dir").as_string::<i32>();
         let depth = by("depth").as_primitive::<UInt16Type>();
         let nf = by("n_files").as_primitive::<Int64Type>();
@@ -523,10 +577,16 @@ pub fn write_index(path: &Path, rows: &[IndexRow]) -> Result<()> {
 
 pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(ROW_GROUP).build()?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+        .with_batch_size(ROW_GROUP)
+        .build()?;
     for batch in reader {
         let batch = batch?;
-        let by = |n: &str| batch.column_by_name(n).unwrap_or_else(|| panic!("column {n}"));
+        let by = |n: &str| {
+            batch
+                .column_by_name(n)
+                .unwrap_or_else(|| panic!("column {n}"))
+        };
         let sha = by("sha").as_fixed_size_binary();
         let pack = by("pack").as_primitive::<UInt32Type>();
         let co = by("chunk_offset").as_primitive::<Int64Type>();

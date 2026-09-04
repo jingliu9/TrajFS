@@ -1,6 +1,6 @@
 # trajfs — design and test plan
 
-Status: draft 1, 2026-09-04. Derived from `idea.md` and `idea-review.md` (Review 1). Numbers quoted below are the
+Status: draft 1, 2026-09-04. Derived from `docs/idea.md` and `docs/idea-review.md` (Review 1). Numbers quoted below are the
 Review 1 measurements on the fourth-grid run `claude-opus-4.8-678xazw/onesw-generation-20260902T033145Z`
 (2.17 M paths, 12.9 GB kept, 23,864 distinct blobs, 3.05 GB distinct).
 

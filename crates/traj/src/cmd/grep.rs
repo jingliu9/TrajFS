@@ -39,21 +39,45 @@ fn looks_binary(b: &[u8]) -> bool {
 pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
     let st = one_store(stores)?;
     // (?m): ^ and $ anchor at line boundaries, as in grep
-    let pats: Vec<String> = a.patterns.iter().map(|p| format!("(?m){}{p}", if a.ignore_case { "(?i)" } else { "" })).collect();
+    let pats: Vec<String> = a
+        .patterns
+        .iter()
+        .map(|p| format!("(?m){}{p}", if a.ignore_case { "(?i)" } else { "" }))
+        .collect();
     let set = RegexSet::new(&pats)?;
-    let name_g = a.name.as_deref().map(|g| Glob::new(g)).transpose()?.map(|g| g.compile_matcher());
+    let name_g = a
+        .name
+        .as_deref()
+        .map(|g| Glob::new(g))
+        .transpose()?
+        .map(|g| g.compile_matcher());
     let dir = norm(&a.path);
     let mut by_sha: HashMap<Sha, Vec<String>> = HashMap::new();
-    st.scan_under(&dir, false, |p| name_g.as_ref().map(|g| g.is_match(trajfs_core::basename_of(p))).unwrap_or(true), |r| {
-        // symlinks hold a target string, not content; grep -r skips them too
-        if r.kind == trajfs_core::Kind::File {
-            by_sha.entry(r.sha).or_default().push(r.path);
-        }
-    })?;
+    st.scan_under(
+        &dir,
+        false,
+        |p| {
+            name_g
+                .as_ref()
+                .map(|g| g.is_match(trajfs_core::basename_of(p)))
+                .unwrap_or(true)
+        },
+        |r| {
+            // symlinks hold a target string, not content; grep -r skips them too
+            if r.kind == trajfs_core::Kind::File {
+                by_sha.entry(r.sha).or_default().push(r.path);
+            }
+        },
+    )?;
     // read blobs in pack order for locality
     let index = st.index()?;
     let mut shas: Vec<&Sha> = by_sha.keys().collect();
-    shas.sort_by_key(|s| index.get(*s).map(|l| (l[0].pack, l[0].chunk_offset, l[0].offset)).unwrap_or((u32::MAX, 0, 0)));
+    shas.sort_by_key(|s| {
+        index
+            .get(*s)
+            .map(|l| (l[0].pack, l[0].chunk_offset, l[0].offset))
+            .unwrap_or((u32::MAX, 0, 0))
+    });
     let mut reader = st.reader();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -74,7 +98,11 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
         }
         let mut lines: Vec<(usize, &[u8])> = Vec::new();
         // a trailing newline terminates the last line; it does not start an empty one
-        let body = if bytes.last() == Some(&b'\n') { &bytes[..bytes.len() - 1] } else { &bytes[..] };
+        let body = if bytes.last() == Some(&b'\n') {
+            &bytes[..bytes.len() - 1]
+        } else {
+            &bytes[..]
+        };
         for (i, line) in body.split(|&c| c == b'\n').enumerate() {
             if set.is_match(line) {
                 lines.push((i + 1, line));

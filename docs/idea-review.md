@@ -113,7 +113,7 @@ Reading of the numbers:
 
 ### 3. Against the stated requirements
 
-Requirements from `idea.md`: (a) fast commit/push/pull, (b) `ls` etc. still work, (c) open individual files in VS Code
+Requirements from `docs/idea.md`: (a) fast commit/push/pull, (b) `ls` etc. still work, (c) open individual files in VS Code
 for review, (d) analysis, increasingly by agents.
 
 **tar + FUSE (chunked tars committed to git, mounted for reading)**
@@ -136,12 +136,12 @@ for review, (d) analysis, increasingly by agents.
 - (b) `traj ls`, `traj find`, `traj du` are millisecond queries. Muscle memory changes, capability does not.
 - (c) Weakest point. Humans get files via `traj cat` / `traj extract <subtree> /tmp/x`; extracting a full round (107 K
   files) is seconds. VS Code cannot open a Parquet blob; it opens the extracted tree. If human browsing is occasional,
-  as `idea.md` states, this is acceptable. If it turns out to be daily, add FUSE over the same store (see hybrid).
+  as `docs/idea.md` states, this is acceptable. If it turns out to be daily, add FUSE over the same store (see hybrid).
 - (d) Best of the options: `find`/`grep`/aggregates in ms–s, and, once `events.jsonl` is parsed into an `events` table,
   the task23/task24-style sweeps (review verdicts per round, roofline ratios, tool-call failures across runs) become
   single SQL statements instead of Python walkers. This is where the "AI agent consumer prefers SQL" argument is true;
   every analysis done on this grid so far was exactly such a sweep.
-- Corrections to the proposal in `idea.md`: (1) do not put blob bytes in Parquet as the primary store (point-read cost
+- Corrections to the proposal in `docs/idea.md`: (1) do not put blob bytes in Parquet as the primary store (point-read cost
   above); (2) the "stable envelope + `payload_json`" schema advice is right, and `events.jsonl` already is that envelope,
   so the events table is a derived layer that can be rebuilt when the schema changes; (3) DuckDB's own `.db` file should
   never be the persistent artifact, Parquet + packs are.

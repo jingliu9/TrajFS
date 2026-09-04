@@ -1,4 +1,4 @@
-//! Source-tree walk with rule filtering (PLAN.md §4 step 1).
+//! Source-tree walk with rule filtering (docs/PLAN.md §4 step 1).
 
 use crate::rules::{Decision, Rules};
 use crate::Kind;
@@ -40,7 +40,9 @@ fn is_elf(path: &Path) -> bool {
 
 /// Walk `root`, never following symlinks, never descending into `skip` (absolute paths, e.g. a store inside the tree).
 pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> {
-    let root = root.canonicalize().with_context(|| format!("source {}", root.display()))?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("source {}", root.display()))?;
     let mut kept = Vec::new();
     let mut excluded = Vec::new();
     let mut errors = Vec::new();
@@ -62,8 +64,17 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
             let n = entry.file_name().to_string_lossy();
             if excl_dirs.iter().any(|x| x.as_str() == n) {
                 // the whole subtree is left out; recorded once as a directory row
-                let rel = entry.path().strip_prefix(&root).unwrap().to_string_lossy().to_string();
-                excluded.push(Excluded { rel, size: 0, rule: "exclude_dirs" });
+                let rel = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                excluded.push(Excluded {
+                    rel,
+                    size: 0,
+                    rule: "exclude_dirs",
+                });
                 it.skip_current_dir();
                 continue;
             }
@@ -88,13 +99,27 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
         };
         let ft = entry.file_type();
         let (kind, size, mode) = if ft.is_symlink() {
-            let target_len = std::fs::read_link(entry.path()).map(|t| t.as_os_str().len()).unwrap_or(0);
+            let target_len = std::fs::read_link(entry.path())
+                .map(|t| t.as_os_str().len())
+                .unwrap_or(0);
             (Kind::Symlink, target_len as u64, 0o777u16)
         } else if ft.is_file() {
             let exec = md.permissions().mode() & 0o111 != 0;
-            (if md.len() == 0 { Kind::Empty } else { Kind::File }, md.len(), if exec { 0o755 } else { 0o644 })
+            (
+                if md.len() == 0 {
+                    Kind::Empty
+                } else {
+                    Kind::File
+                },
+                md.len(),
+                if exec { 0o755 } else { 0o644 },
+            )
         } else {
-            excluded.push(Excluded { rel, size: 0, rule: "special-file" });
+            excluded.push(Excluded {
+                rel,
+                size: 0,
+                rule: "special-file",
+            });
             continue;
         };
         let abs = entry.path().to_path_buf();
@@ -112,5 +137,9 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
     }
     kept.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
     excluded.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
-    Ok(WalkResult { kept, excluded, errors })
+    Ok(WalkResult {
+        kept,
+        excluded,
+        errors,
+    })
 }

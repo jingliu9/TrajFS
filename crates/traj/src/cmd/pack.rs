@@ -1,7 +1,7 @@
 use crate::config::{check_separation, Config};
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trajfs_core::ingest::{ingest, IngestOptions};
 use trajfs_core::rules::Rules;
 
@@ -40,12 +40,21 @@ pub fn resolve(a: &PackArgs) -> Result<(PathBuf, String, String)> {
     let store = match (&a.out, &cfg) {
         (Some(s), _) => s.clone(),
         (None, Some(c)) => {
-            let id = a.id.clone().unwrap_or_else(|| a.src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "store".into()));
+            let id = a.id.clone().unwrap_or_else(|| {
+                a.src
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "store".into())
+            });
             c.store_path(&id)
         }
         (None, None) => bail!("no --store given and no trajfs.toml found"),
     };
-    let adapter = a.adapter.clone().or_else(|| cfg.as_ref().map(|c| c.file.adapter.clone())).unwrap_or_else(|| "none".into());
+    let adapter = a
+        .adapter
+        .clone()
+        .or_else(|| cfg.as_ref().map(|c| c.file.adapter.clone()))
+        .unwrap_or_else(|| "none".into());
     let ad = trajfs_adapters::resolve(&adapter, cfg.as_ref().map(|c| c.dir.as_path()))?;
     let rules = a
         .rules
@@ -99,10 +108,17 @@ pub fn run(a: PackArgs) -> Result<i32> {
         for e in b.errors.iter().take(20) {
             eprintln!("error: {e}");
         }
-        eprintln!("{} paths could not be read (listed in MANIFEST.json)", b.errors.len());
+        eprintln!(
+            "{} paths could not be read (listed in MANIFEST.json)",
+            b.errors.len()
+        );
         return Ok(1);
     }
-    println!("next: traj verify -S {}  then  traj commit --push {}", sum.store.display(), sum.store.display());
+    println!(
+        "next: traj verify -S {}  then  traj commit --push {}",
+        sum.store.display(),
+        sum.store.display()
+    );
     Ok(0)
 }
 
@@ -126,36 +142,33 @@ pub struct WatchArgs {
     pub jobs: usize,
 }
 
-/// Polling watcher: for every run directory directly under `root`, ask the adapter whether a batch is ready
-/// (labels already in the manifest are skipped) and pack it.
+/// Polling watcher: discover matching run directories without descending into
+/// them, ask the adapter whether a batch is ready, and pack it.
 pub fn watch(a: WatchArgs) -> Result<i32> {
     let cfg = Config::require()?;
     let root = a.root.clone().unwrap_or_else(|| cfg.data_root());
     let ad = cfg.adapter()?;
     let run_glob = ad.run_glob().unwrap_or_else(|| "*".into());
-    let depth = run_glob.matches('/').count() + 1;
     let matcher = globset::Glob::new(&run_glob)?.compile_matcher();
     let mut done = 0u32;
     loop {
-        let mut runs: Vec<PathBuf> = Vec::new();
-        for e in walkdir::WalkDir::new(&root).min_depth(1).max_depth(depth).into_iter().flatten() {
-            if e.file_type().is_dir() && e.depth() == depth {
-                let rel = e.path().strip_prefix(&root).unwrap().to_string_lossy().to_string();
-                if matcher.is_match(&rel) {
-                    runs.push(e.path().to_path_buf());
-                }
-            }
-        }
+        let runs = discover_runs(&root, &matcher)?;
         for run_dir in runs {
-            let id = run_dir.file_name().unwrap().to_string_lossy().to_string();
+            let id = store_id(&root, &run_dir)?;
             let store = cfg.store_path(&id);
-            let already: Vec<String> = trajfs_core::Manifest::load(&store).map(|m| m.batches.iter().map(|b| b.label.clone()).collect()).unwrap_or_default();
+            let already: Vec<String> = trajfs_core::Manifest::load(&store)
+                .map(|m| m.batches.iter().map(|b| b.label.clone()).collect())
+                .unwrap_or_default();
             if let Some(label) = ad.batch_ready(&run_dir, &already) {
                 eprintln!("{}: packing {label}", run_dir.display());
-                let r = run_args_for(&run_dir, &store, &cfg, &label, a.jobs)?;
+                let r = run_args_for(&run_dir, &store, &cfg, &label, &id, a.jobs)?;
                 run(r)?;
                 if a.commit {
-                    crate::cmd::commit::run(crate::cmd::commit::CommitArgs { store: store.display().to_string(), push: a.push, message: None })?;
+                    crate::cmd::commit::run(crate::cmd::commit::CommitArgs {
+                        store: store.display().to_string(),
+                        push: a.push,
+                        message: None,
+                    })?;
                 }
                 done += 1;
                 if a.max_batches > 0 && done >= a.max_batches {
@@ -170,7 +183,54 @@ pub fn watch(a: WatchArgs) -> Result<i32> {
     }
 }
 
-fn run_args_for(run: &std::path::Path, store: &std::path::Path, cfg: &Config, label: &str, jobs: usize) -> Result<PackArgs> {
+fn discover_runs(root: &Path, matcher: &globset::GlobMatcher) -> Result<Vec<PathBuf>> {
+    let mut runs = Vec::new();
+    let mut entries = walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter();
+    while let Some(entry) = entries.next() {
+        let entry = entry?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(root)?;
+        if matcher.is_match(relative) {
+            runs.push(entry.path().to_path_buf());
+            entries.skip_current_dir();
+        }
+    }
+    runs.sort();
+    Ok(runs)
+}
+
+fn store_id(root: &Path, run: &Path) -> Result<String> {
+    let relative = run
+        .strip_prefix(root)
+        .with_context(|| format!("run {} is outside {}", run.display(), root.display()))?;
+    let mut id = String::new();
+    for byte in relative.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            id.push(*byte as char);
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut id, "%{byte:02X}")?;
+        }
+    }
+    if id.is_empty() {
+        bail!("run path has no store id: {}", run.display());
+    }
+    Ok(id)
+}
+
+fn run_args_for(
+    run: &Path,
+    store: &Path,
+    cfg: &Config,
+    label: &str,
+    id: &str,
+    jobs: usize,
+) -> Result<PackArgs> {
     Ok(PackArgs {
         src: run.to_path_buf(),
         out: Some(store.to_path_buf()),
@@ -180,6 +240,25 @@ fn run_args_for(run: &std::path::Path, store: &std::path::Path, cfg: &Config, la
         jobs,
         no_derive: false,
         strict: false,
-        id: None,
+        id: Some(id.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_run_ids_are_collision_free_and_readable() {
+        let root = Path::new("/runs");
+        assert_eq!(store_id(root, Path::new("/runs/run7")).unwrap(), "run7");
+        assert_eq!(
+            store_id(root, Path::new("/runs/suite/task/run7")).unwrap(),
+            "suite%2Ftask%2Frun7"
+        );
+        assert_ne!(
+            store_id(root, Path::new("/runs/suite/task/run7")).unwrap(),
+            store_id(root, Path::new("/runs/other/task/run7")).unwrap()
+        );
+    }
 }

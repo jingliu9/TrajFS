@@ -1,4 +1,4 @@
-//! The derived `events` envelope (PLAN.md §3.5) and its Parquet writer.
+//! The derived `events` envelope (docs/PLAN.md §3.5) and its Parquet writer.
 
 use anyhow::{Context, Result};
 use arrow::array::{
@@ -119,7 +119,9 @@ impl EventsWriter {
             Arc::new(self.ver.finish()),
         ];
         let batch = RecordBatch::try_new(self.schema.clone(), cols)?;
-        self.writer.write(&batch).context("write events row group")?;
+        self.writer
+            .write(&batch)
+            .context("write events row group")?;
         Ok(())
     }
 

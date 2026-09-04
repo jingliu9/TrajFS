@@ -1,4 +1,4 @@
-//! `traj`: the trajfs command line (PLAN.md §5, §6.1, §12, §13).
+//! `traj`: the trajfs command line (docs/PLAN.md §5, §6.1, §12, §13).
 
 mod cmd;
 mod config;
@@ -9,7 +9,11 @@ use clap::{Parser, Subcommand};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(name = "traj", version, about = "content-addressed store for agent run trees")]
+#[command(
+    name = "traj",
+    version,
+    about = "content-addressed store for agent run trees"
+)]
 struct Cli {
     /// Store directory or store id (repeatable for `sql`). Defaults to TRAJ_STORE.
     #[arg(short = 'S', long = "store", global = true, env = "TRAJ_STORE")]
@@ -65,7 +69,10 @@ enum Cmd {
 fn main() {
     // Invoked through a hook symlink: `.git/hooks/pre-commit -> traj`
     let argv0 = std::env::args().next().unwrap_or_default();
-    let base = std::path::Path::new(&argv0).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let base = std::path::Path::new(&argv0)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let code = if base == "pre-commit" {
         run(cmd::hook::pre_commit())
     } else {

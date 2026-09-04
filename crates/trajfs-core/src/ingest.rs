@@ -1,4 +1,4 @@
-//! `traj pack`: walk → filter → hash → dedupe → pack → catalog → derived → manifest (PLAN.md §4).
+//! `traj pack`: walk → filter → hash → dedupe → pack → catalog → derived → manifest (docs/PLAN.md §4).
 
 use crate::adapter::Adapter;
 use crate::catalog;
@@ -41,7 +41,10 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
     let mut removed = Vec::new();
     let next_batch = m.next_batch_id();
     let next_pack = m.next_pack_id();
-    for (dir, prefixes) in [("catalog", vec!["files-", "dirs-", "excluded-"]), ("packs", vec!["index-"])] {
+    for (dir, prefixes) in [
+        ("catalog", vec!["files-", "dirs-", "excluded-"]),
+        ("packs", vec!["index-"]),
+    ] {
         let d = store.join(dir);
         if !d.is_dir() {
             continue;
@@ -52,7 +55,10 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
             let mut orphan = n.ends_with(".tmp");
             for p in &prefixes {
                 if let Some(rest) = n.strip_prefix(p) {
-                    if let Some(id) = rest.strip_suffix(".parquet").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(id) = rest
+                        .strip_suffix(".parquet")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         if id >= next_batch {
                             orphan = true;
                         }
@@ -82,7 +88,10 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
             for e in std::fs::read_dir(a.path())? {
                 let e = e?;
                 let n = e.file_name().to_string_lossy().to_string();
-                let id = n.rsplit_once('-').and_then(|(_, r)| r.strip_suffix(".parquet")).and_then(|s| s.parse::<u32>().ok());
+                let id = n
+                    .rsplit_once('-')
+                    .and_then(|(_, r)| r.strip_suffix(".parquet"))
+                    .and_then(|s| s.parse::<u32>().ok());
                 if n.ends_with(".tmp") || id.map(|i| i >= next_batch).unwrap_or(false) {
                     std::fs::remove_file(e.path())?;
                     removed.push(format!("derived/{}/{n}", a.file_name().to_string_lossy()));
@@ -95,28 +104,43 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
 
 pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSummary> {
     let t0 = Instant::now();
-    let src = src.canonicalize().with_context(|| format!("source {}", src.display()))?;
+    let src = src
+        .canonicalize()
+        .with_context(|| format!("source {}", src.display()))?;
     std::fs::create_dir_all(store)?;
     let store = store.canonicalize()?;
     if store.starts_with(&src) && store != src {
         // allowed, but the store must not be walked
     }
     if src.starts_with(&store) {
-        bail!("source {} is inside the store {}", src.display(), store.display());
+        bail!(
+            "source {} is inside the store {}",
+            src.display(),
+            store.display()
+        );
     }
     let lock = std::fs::File::create(store.join(".lock"))?;
-    lock.try_lock_exclusive().with_context(|| format!("another traj pack holds {}", store.join(".lock").display()))?;
+    lock.try_lock_exclusive()
+        .with_context(|| format!("another traj pack holds {}", store.join(".lock").display()))?;
 
     let mut manifest = match Manifest::load(&store) {
         Ok(m) => m,
         Err(_) if !Manifest::path(&store).exists() => Manifest {
             format: FORMAT_VERSION,
             store_id: opts.store_id.clone().unwrap_or_else(|| {
-                src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "store".into())
+                src.file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "store".into())
             }),
             source: src.display().to_string(),
-            adapter: AdapterInfo { name: opts.adapter.name().to_string(), version: opts.adapter.version() },
-            rules: RulesInfo { name: opts.rules.file.name.clone(), version: opts.rules.file.version },
+            adapter: AdapterInfo {
+                name: opts.adapter.name().to_string(),
+                version: opts.adapter.version(),
+            },
+            rules: RulesInfo {
+                name: opts.rules.file.name.clone(),
+                version: opts.rules.file.version,
+            },
             batches: Vec::new(),
         },
         Err(e) => return Err(e),
@@ -138,7 +162,11 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
     std::fs::create_dir_all(store.join("packs"))?;
 
     // 1. walk
-    let skip = if store.starts_with(&src) { vec![store.clone()] } else { vec![] };
+    let skip = if store.starts_with(&src) {
+        vec![store.clone()]
+    } else {
+        vec![]
+    };
     let w = walk(&src, &opts.rules, &skip)?;
     let mut errors = w.errors.clone();
 
@@ -165,7 +193,9 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
     }
 
     // 3. hash
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.jobs.max(1)).build()?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(opts.jobs.max(1))
+        .build()?;
     let hashed: Vec<Result<(usize, Sha, Option<Vec<u8>>)>> = pool.install(|| {
         todo.par_iter()
             .enumerate()
@@ -224,7 +254,9 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         let c = todo[i];
         match r.kind {
             Kind::Symlink => {} // handled below from link_targets
-            Kind::File if c.size as usize <= CHUNK_BYTES => small.push((r.sha, c.abs.clone(), c.size)),
+            Kind::File if c.size as usize <= CHUNK_BYTES => {
+                small.push((r.sha, c.abs.clone(), c.size))
+            }
             Kind::File => large.push((r.sha, c.abs.clone())),
             Kind::Empty => {}
         }
@@ -240,19 +272,34 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         pw.add_file(*sha, p)?;
     }
     let (index_rows, packs, _bin, bout) = pw.finish()?;
-    let index_path = store.join("packs").join(format!("index-{batch_id:04}.parquet"));
+    let index_path = store
+        .join("packs")
+        .join(format!("index-{batch_id:04}.parquet"));
     catalog::write_index(&index_path, &index_rows)?;
 
     // 5. catalog
-    let files_path = store.join("catalog").join(format!("files-{batch_id:04}.parquet"));
+    let files_path = store
+        .join("catalog")
+        .join(format!("files-{batch_id:04}.parquet"));
     let mut fw = catalog::FilesWriter::create(&files_path);
     for r in &rows {
         fw.push(r)?;
     }
     fw.finish()?;
     let dirs = catalog::dirs_from_files(rows.iter(), batch_id);
-    catalog::write_dirs(&store.join("catalog").join(format!("dirs-{batch_id:04}.parquet")), &dirs)?;
-    catalog::write_excluded(&store.join("catalog").join(format!("excluded-{batch_id:04}.parquet")), &w.excluded, batch_id)?;
+    catalog::write_dirs(
+        &store
+            .join("catalog")
+            .join(format!("dirs-{batch_id:04}.parquet")),
+        &dirs,
+    )?;
+    catalog::write_excluded(
+        &store
+            .join("catalog")
+            .join(format!("excluded-{batch_id:04}.parquet")),
+        &w.excluded,
+        batch_id,
+    )?;
 
     // 6. derived tables
     let mut derived = Vec::new();
@@ -298,13 +345,20 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
     manifest.batches.push(batch.clone());
     manifest.save(&store)?;
     write_gitattributes(&store)?;
-    Ok(IngestSummary { batch, skipped_unchanged: skipped, store })
+    Ok(IngestSummary {
+        batch,
+        skipped_unchanged: skipped,
+        store,
+    })
 }
 
 fn write_gitattributes(store: &Path) -> Result<()> {
     let p = store.join(".gitattributes");
     if !p.exists() {
-        std::fs::write(p, "*.pack -diff -delta binary\n*.parquet -diff -delta binary\n")?;
+        std::fs::write(
+            p,
+            "*.pack -diff -delta binary\n*.parquet -diff -delta binary\n",
+        )?;
     }
     Ok(())
 }

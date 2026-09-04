@@ -1,6 +1,6 @@
 //! trajfs-core: content-addressed store for agent run trees.
 //!
-//! Layout of a store (see PLAN.md §3):
+//! Layout of a store (see docs/PLAN.md §3):
 //! `MANIFEST.json`, `catalog/files-B.parquet`, `catalog/dirs-B.parquet`, `catalog/excluded-B.parquet`,
 //! `packs/NNNN.pack`, `packs/index-B.parquet`, `derived/<adapter>/<table>-B.parquet`.
 
