@@ -68,8 +68,9 @@ traj doctor
 `init` writes `trajfs.toml`, a `.gitattributes` for the store directory, a catch-all `.gitignore` in the data root,
 installs the pre-commit hook (a symlink to the `traj` binary), and exports an agent skill to
 `.claude/skills/traj/SKILL.md` and `AGENTS.md`. The hook refuses commits that stage raw run paths, more than ten
-thousand new paths, or files over 64 MiB, and prints the `traj pack` / `traj commit` commands to use instead.
-Deleting tracked raw paths stays allowed, so an existing repository can migrate.
+thousand new paths, files over 65 MiB, or nested `store_root` results that are not complete, readable TrajFS
+stores. It prints the `traj pack` / `traj commit` commands to use instead. Deleting tracked raw paths stays
+allowed, so an existing repository can migrate.
 
 Then, per run or continuously:
 

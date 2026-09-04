@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_NAME: &str = "trajfs.toml";
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 65 << 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigFile {
@@ -44,7 +45,9 @@ fn default_max_paths() -> usize {
     10_000
 }
 fn default_max_bytes() -> u64 {
-    64 << 20
+    // A pack seals after crossing 64 MiB, so its final <=1 MiB frame can
+    // legitimately carry it slightly above the seal threshold.
+    DEFAULT_MAX_FILE_BYTES
 }
 
 fn default_store_root() -> PathBuf {
