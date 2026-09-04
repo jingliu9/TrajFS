@@ -1,0 +1,8 @@
+name = "rounds-rules"
+version = 1
+exclude_dirs = [".cache", "node_modules"]
+exclude_ext = ["pyc"]
+[[exclude_under]]
+dirs = ["logs"]
+ext = ["csv"]
+max_bytes = 2097152

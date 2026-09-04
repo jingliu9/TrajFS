@@ -1,0 +1,12 @@
+{
+ "files": 2173703,
+ "bytes": 12928153598,
+ "hash_s": 22.230038166046143,
+ "unique_blobs": 23864,
+ "unique_bytes": 3053283334,
+ "files_parquet_bytes": 23183125,
+ "files_parquet_s": 6.9524641036987305,
+ "blob_shards": 12,
+ "blob_shard_bytes_total": 449071500,
+ "blobs_s": 18.842777013778687
+}

@@ -1,0 +1,37 @@
+[package]
+name = "traj"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "traj"
+path = "src/main.rs"
+
+[dependencies]
+trajfs-core = { path = "../trajfs-core" }
+trajfs-adapters = { path = "../trajfs-adapters" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+hex.workspace = true
+regex.workspace = true
+globset.workspace = true
+chrono.workspace = true
+walkdir.workspace = true
+similar = "2"
+duckdb = { version = "1", features = ["bundled", "vscalar", "vscalar-arrow"], optional = true }
+
+[features]
+default = ["sql"]
+sql = ["dep:duckdb"]
+slow = []
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+walkdir.workspace = true
+sha2.workspace = true
+hex.workspace = true

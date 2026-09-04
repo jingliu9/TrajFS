@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/trajfs-core", "crates/trajfs-adapters", "crates/traj"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+zstd = "0.13"
+rayon = "1.11"
+walkdir = "2.5"
+globset = "0.4"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+parquet = { version = "57", default-features = false, features = ["arrow", "zstd", "snap"] }
+arrow = { version = "57", default-features = false }
+clap = { version = "4", features = ["derive", "env"] }
+fs2 = "0.4"
+tempfile = "3"
+proptest = "1"
+assert_cmd = "2"
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = true

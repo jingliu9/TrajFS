@@ -1,0 +1,14 @@
+name = "rounds-layout"
+version = 1
+rules = "rounds-rules.toml"
+[[attrs]]
+pattern = '^rounds/round-(?P<round>\d+)/(?P<role>[^/]+)(?:/|$)'
+strip_leading_zeros = ["round"]
+[trajectories]
+globs = ["**/events.jsonl"]
+format = "copilot-cli"
+[batch_ready]
+run_glob = "*"
+markers = ["rounds/round-*/DONE"]
+[hook]
+raw_patterns = ['(^|/)rounds/round-\d+/']

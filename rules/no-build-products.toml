@@ -1,0 +1,5 @@
+name = "no-build-products"
+version = 1
+exclude_dirs = [".git", ".cache", "node_modules", "__pycache__", ".venv", "venv", "target", "build", ".mypy_cache", ".pytest_cache"]
+exclude_ext = ["pyc", "pyo", "so", "o", "a", "dylib", "wasm", "whl", "class"]
+elf_min_bytes = 65536
