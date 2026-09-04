@@ -172,6 +172,73 @@ fn prune(builder: &ParquetRecordBatchReaderBuilder<File>, col: &str, lo: &[u8], 
     out
 }
 
+/// Row groups that can hold a *direct* child of `dir`: a group whose min and max paths both lie below the same
+/// subdirectory of `dir` holds none, because direct children sort outside such a group.
+fn prune_direct(builder: &ParquetRecordBatchReaderBuilder<File>, dir: &str) -> Vec<usize> {
+    let prefix: Vec<u8> = if dir.is_empty() { Vec::new() } else { format!("{dir}/").into_bytes() };
+    let first_component_dir = |p: &[u8]| -> Option<Vec<u8>> {
+        // Some(component) when p is under prefix and has a '/' after its first component
+        let rest = p.strip_prefix(prefix.as_slice())?;
+        let i = rest.iter().position(|&c| c == b'/')?;
+        Some(rest[..i].to_vec())
+    };
+    let schema = builder.parquet_schema();
+    let idx = schema.columns().iter().position(|c| c.name() == "path");
+    let mut out = Vec::new();
+    let mut lo = prefix.clone();
+    let mut hi = prefix.clone();
+    if dir.is_empty() {
+        hi = vec![0xff];
+    } else {
+        lo.pop();
+        lo.push(b'/');
+        hi.pop();
+        hi.push(b'0');
+    }
+    for (i, rg) in builder.metadata().row_groups().iter().enumerate() {
+        let keep = match idx.and_then(|ci| rg.column(ci).statistics()) {
+            Some(Statistics::ByteArray(s)) => match (s.min_opt(), s.max_opt()) {
+                (Some(min), Some(max)) => {
+                    let (min, max) = (min.as_bytes(), max.as_bytes());
+                    let in_range = dir.is_empty() || (max >= lo.as_slice() && min < hi.as_slice());
+                    in_range
+                        && match (first_component_dir(min), first_component_dir(max)) {
+                            (Some(a), Some(b)) => a != b,
+                            _ => true,
+                        }
+                }
+                _ => true,
+            },
+            _ => true,
+        };
+        if keep {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Direct children (files) of `dir` in one segment, materialising only matching rows.
+pub fn scan_direct_children(segment: &Path, dir: &str, with_attrs: bool, mut f: impl FnMut(FileRow)) -> Result<()> {
+    let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let groups = prune_direct(&builder, dir);
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let mut cols = vec!["path", "kind", "mode", "size", "sha", "mtime_ns", "batch"];
+    if with_attrs {
+        cols.push("attrs");
+    }
+    let mask = ProjectionMask::columns(builder.parquet_schema(), cols.iter().copied());
+    let reader = builder.with_row_groups(groups).with_projection(mask).with_batch_size(ROW_GROUP).build()?;
+    for batch in reader {
+        let batch = batch?;
+        decode_rows(&batch, with_attrs, |p| crate::parent_of(p) == dir, &mut f);
+    }
+    Ok(())
+}
+
 /// Scan one `files` segment. `range` = `[lo, hi)` on the bytewise path order; `None` = everything.
 /// `columns` restricts the columns read (attrs is only decoded when requested).
 pub fn scan_files(
@@ -208,48 +275,55 @@ pub fn scan_files_filtered(
     let reader = builder.with_projection(mask).with_batch_size(ROW_GROUP).build()?;
     for batch in reader {
         let batch = batch?;
-        let by = |n: &str| batch.column_by_name(n).unwrap_or_else(|| panic!("column {n}"));
-        let path = by("path").as_string::<i32>();
-        let kind = by("kind").as_primitive::<UInt8Type>();
-        let mode = by("mode").as_primitive::<UInt16Type>();
-        let size = by("size").as_primitive::<Int64Type>();
-        let sha = by("sha").as_fixed_size_binary();
-        let mtime = by("mtime_ns").as_primitive::<Int64Type>();
-        let bt = by("batch").as_primitive::<UInt32Type>();
-        let attrs = if with_attrs { Some(by("attrs").as_map()) } else { None };
-        for i in 0..batch.num_rows() {
-            let p = path.value(i);
+        let pre_range = |p: &str| {
             if let Some((lo, hi)) = range {
                 let pb = p.as_bytes();
                 if pb < lo || pb >= hi {
-                    continue;
+                    return false;
                 }
             }
-            if !pre(p) {
-                continue;
-            }
-            let mut a = Vec::new();
-            if let Some(m) = attrs {
-                let entries = m.value(i);
-                let ks = entries.column(0).as_string::<i32>();
-                let vs = entries.column(1).as_string::<i32>();
-                for j in 0..entries.len() {
-                    a.push((ks.value(j).to_string(), vs.value(j).to_string()));
-                }
-            }
-            f(FileRow {
-                path: p.to_string(),
-                kind: Kind::from_u8(kind.value(i)).unwrap_or(Kind::File),
-                mode: mode.value(i),
-                size: size.value(i),
-                sha: sha.value(i).try_into().unwrap(),
-                mtime_ns: mtime.value(i),
-                batch: bt.value(i),
-                attrs: a,
-            });
-        }
+            pre(p)
+        };
+        decode_rows(&batch, with_attrs, pre_range, &mut f);
     }
     Ok(())
+}
+
+fn decode_rows(batch: &RecordBatch, with_attrs: bool, pre: impl Fn(&str) -> bool, f: &mut impl FnMut(FileRow)) {
+    let by = |n: &str| batch.column_by_name(n).unwrap_or_else(|| panic!("column {n}"));
+    let path = by("path").as_string::<i32>();
+    let kind = by("kind").as_primitive::<UInt8Type>();
+    let mode = by("mode").as_primitive::<UInt16Type>();
+    let size = by("size").as_primitive::<Int64Type>();
+    let sha = by("sha").as_fixed_size_binary();
+    let mtime = by("mtime_ns").as_primitive::<Int64Type>();
+    let bt = by("batch").as_primitive::<UInt32Type>();
+    let attrs = if with_attrs { Some(by("attrs").as_map()) } else { None };
+    for i in 0..batch.num_rows() {
+        let p = path.value(i);
+        if !pre(p) {
+            continue;
+        }
+        let mut a = Vec::new();
+        if let Some(m) = attrs {
+            let entries = m.value(i);
+            let ks = entries.column(0).as_string::<i32>();
+            let vs = entries.column(1).as_string::<i32>();
+            for j in 0..entries.len() {
+                a.push((ks.value(j).to_string(), vs.value(j).to_string()));
+            }
+        }
+        f(FileRow {
+            path: p.to_string(),
+            kind: Kind::from_u8(kind.value(i)).unwrap_or(Kind::File),
+            mode: mode.value(i),
+            size: size.value(i),
+            sha: sha.value(i).try_into().unwrap(),
+            mtime_ns: mtime.value(i),
+            batch: bt.value(i),
+            attrs: a,
+        });
+    }
 }
 
 // ---------------------------------------------------------------- dirs

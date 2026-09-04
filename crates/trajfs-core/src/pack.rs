@@ -381,4 +381,62 @@ mod tests {
         let raw = zstd::bulk::decompress(&data[l.chunk_offset as usize..(l.chunk_offset + l.chunk_len as i64) as usize], 1 << 22).unwrap();
         assert_eq!(&raw[l.offset as usize..l.offset as usize + 5], b"hello");
     }
+
+    /// Deterministic incompressible bytes (xorshift), so pack sealing is reached with modest input.
+    fn noise(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        let mut v = Vec::with_capacity(n);
+        while v.len() < n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.truncate(n);
+        v
+    }
+
+    #[test]
+    fn t1_pack_seals_at_64mib_and_large_blobs_split_into_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = PackWriter::new(dir.path(), 1).unwrap();
+        // 100 MiB incompressible blob -> 100 parts, spanning two packs
+        let big = noise(100 << 20, 7);
+        let big_sha = sha_of_bytes(&big);
+        w.add_bytes(big_sha, &big).unwrap();
+        // exact boundaries
+        for n in [CHUNK_BYTES, CHUNK_BYTES + 1, 0] {
+            let b = noise(n, n as u64 + 1);
+            w.add_bytes(sha_of_bytes(&b), &b).unwrap();
+        }
+        let (rows, packs, _, _) = w.finish().unwrap();
+        assert_eq!(packs, vec![1, 2], "100 MiB of noise must seal pack 1 at 64 MiB and continue in pack 2");
+        let len1 = std::fs::metadata(dir.path().join(pack_name(1))).unwrap().len();
+        assert!(len1 >= PACK_SEAL_BYTES && len1 < PACK_SEAL_BYTES + (CHUNK_BYTES as u64) + 1024, "{len1}");
+        let parts: Vec<&IndexRow> = rows.iter().filter(|r| r.sha == big_sha).collect();
+        assert_eq!(parts.len(), 100);
+        assert!(parts.iter().any(|r| r.loc.pack == 1) && parts.iter().any(|r| r.loc.pack == 2));
+        // the 0-byte blob leaves no index row
+        assert!(!rows.iter().any(|r| r.sha == sha_of_bytes(b"")));
+        // read back
+        let mut by: HashMap<Sha, Vec<Loc>> = HashMap::new();
+        for r in &rows {
+            by.entry(r.sha).or_default().push(r.loc);
+        }
+        for v in by.values_mut() {
+            v.sort_by_key(|l| l.part);
+        }
+        let mut rd = PackReader::new(dir.path());
+        assert_eq!(rd.blob(&by[&big_sha]).unwrap(), big);
+        // every frame is a plain zstd frame: the zstd CLI decodes one cut out by offset
+        let l = by[&big_sha][3];
+        let data = std::fs::read(dir.path().join(pack_name(l.pack))).unwrap();
+        let frame = &data[l.chunk_offset as usize..(l.chunk_offset + l.chunk_len as i64) as usize];
+        let fpath = dir.path().join("frame.zst");
+        std::fs::write(&fpath, frame).unwrap();
+        if let Ok(out) = std::process::Command::new("zstd").arg("-dc").arg(&fpath).output() {
+            assert!(out.status.success());
+            assert_eq!(&out.stdout[l.offset as usize..l.offset as usize + l.size as usize], &big[3 * CHUNK_BYTES..4 * CHUNK_BYTES]);
+        }
+    }
 }

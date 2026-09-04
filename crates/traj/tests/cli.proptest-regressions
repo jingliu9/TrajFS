@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 52db1a1b62fda6cd93dc84fc398a1ef74fdf2842e665bef5e7dedfa01c25aead # shrinks to entries = [("über", File { exec: true, content: [115, 104, 97, 114, 101, 100, 32, 99, 111, 110, 116, 101, 110, 116, 10] }), (".hidden", File { exec: false, content: [115, 104, 97, 114, 101, 100, 32, 99, 111, 110, 116, 101, 110, 116, 10] })]

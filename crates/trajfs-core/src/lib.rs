@@ -83,6 +83,6 @@ pub const CHUNK_BYTES: usize = 1 << 20;
 /// A pack is sealed once its compressed size reaches this.
 pub const PACK_SEAL_BYTES: u64 = 64 << 20;
 /// Row group size for catalog Parquet files.
-pub const ROW_GROUP: usize = 65_536;
+pub const ROW_GROUP: usize = 16_384;
 /// Store format version written to MANIFEST.json.
 pub const FORMAT_VERSION: u32 = 1;

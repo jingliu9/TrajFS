@@ -378,8 +378,10 @@ Prototype numbers on the reference run; the Rust build must meet or beat them.
 ## 11. Test plan
 
 Test code is Rust only: unit tests in each crate, integration tests in `crates/traj/tests/` (`assert_cmd`), property
-tests with `proptest`, latency checks with `criterion`. `cargo test` runs the synthetic-fixture tests in < 60 s;
-`cargo test --features slow` adds the real-dataset tests.
+tests with `proptest`, latency checks with `criterion` (`cargo bench -p traj`). `cargo test --release` runs the
+synthetic-fixture tests in < 10 s; `cargo test --release --features slow -p traj --test cli slow::` runs the
+real-dataset tests and needs `TRAJ_SLOW_SRC` (a run directory) and `TRAJ_SLOW_ADAPTER` (its adapter TOML); their
+expected counts are recorded on first run under `crates/traj/tests/expected/` and asserted afterwards.
 
 **11.0 Fixtures.**
 - `synthetic/`: generated 200-file tree covering every kind/mode, unicode names, duplicates, an empty dir, a
@@ -596,3 +598,34 @@ Deviations from the plan text above, all deliberate:
 Not yet done: onesw-gen `output_root` guard (§6.1 step 1, lives in the onesw repo); `traj bench`; `traj compact`;
 DuckDB-backed full-catalog verbs (M3.1); property-based T2 with `proptest` (the current T2 uses a fixed tree);
 T7 as an automated test (numbers above were taken by hand); T9 push/clone timing against the raw-tree commits.
+
+## 15. Test-plan status — 2026-09-04 (second pass)
+
+After review the §11 plan was implemented in full rather than sampled. `cargo test --release`: 19 tests
+(core 4, adapters 1, CLI 14) in about 8 s; `--features slow`: T6 and T7 against the rank 1 run.
+
+| §11 item | test(s) | notes |
+|---|---|---|
+| T1 pack format | `pack::tests::{roundtrip_small_and_large, t1_pack_seals_at_64mib_and_large_blobs_split_into_parts}` | 100 MiB noise blob across two packs; a frame cut by offset decodes with the `zstd` CLI |
+| T2 property round trip | `t2_property::pack_then_extract_is_byte_identical` (proptest, 24 cases) + `t2_round_trip_is_byte_identical` | random trees: unicode/space/dot names, symlinks, empty files, exec bits, 30 % shared content, multi-MB files; plain and `--hardlink-dedupe --mtime` |
+| T3 integrity | `t3_integrity_detects_corruption` | bit flip (deep), truncated pack, missing index segment, missing pack, missing manifest |
+| T4 catalog semantics | `t4_catalog_verbs_match_the_tree` | `ls`/`find` equal to `ls -A`/`find` on the extracted tree; `du` against `du -sb`; attrs filters; `tree` |
+| T5 grep/sql/events | `t5_grep_cat_sql_events`, `t5b_grep_matches_grep_rl_for_random_patterns` (20 patterns vs `grep -rlE`), `t5c_other_formats_and_rederive` | Claude Code and heterogeneous-JSONL fixtures; re-derive with a bumped adapter version leaves packs and catalog byte-identical |
+| T6 reference round | `slow::t6_reference_round` | counts recorded/asserted; deep verify; byte-identical extract; `cat` p50 ≤ 5 ms; `ls` < 0.5 s |
+| T7 whole run | `slow::t7_whole_run` | counts recorded/asserted; pack ≤ 120 s per 2 M paths; store ≤ 5 % of kept bytes and ≤ 100 files; verb latency bounds; one round extracted byte-identical; DuckDB CLI reads the catalog when installed |
+| T8 incremental | `t8_incremental_batches_add_only_new_content`, `t8b_sigkill_mid_pack_leaves_a_readable_store` (real SIGKILL), `t8c_watch_packs_when_the_adapter_reports_a_batch_ready` | |
+| T9 git | `t9b_separation_and_hook` | hook refusal, migration commit allowed, `traj commit`, clone verifies, push of store vs raw tree against a local bare remote (path counts compared, times printed) |
+| T9b/T9c separation, scaffold | `t9b_…`, `t9c_init_scaffolds_an_adapter_for_the_target_repo` | |
+| T11 skill | `t11_skill_mentions_every_verb_and_carries_the_version` | every worked example in the skill is executed against a fixture store |
+| criterion / bench | `crates/traj/benches/verbs.rs`, `traj bench` | |
+
+Defects the full plan caught that the sampled tests had not:
+- `extract --hardlink-dedupe` linked files with identical content but different exec bits (hard links share the mode);
+  now keyed by (sha, mode).
+- `grep` anchored `^`/`$` at blob boundaries, not line boundaries, and counted a trailing newline as an empty line.
+- `grep` searched symlink targets as content; `grep -r` skips symlinks, so does `traj grep` now.
+- `cat`/`stat` p50 was 8 ms on the reference round (row groups of 65,536 rows were decoded whole for a point lookup);
+  row groups are now 16,384 and `stat` materialises only the matching row: 1–2 ms per lookup, whole process 10 ms.
+- `ls <dir>` on the whole run decoded every path below the directory to find its direct files (0.65 s for
+  `ls rounds`); row groups whose min and max paths lie under the same subdirectory are now skipped, so a listing
+  touches only the groups that can hold direct children (10–20 ms).

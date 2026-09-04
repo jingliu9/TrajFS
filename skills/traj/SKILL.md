@@ -50,9 +50,9 @@ traj extract -S <store> <dir-or-file> /tmp/<name>
 traj edit    -S <store> <path>
 ```
 
-Rebuild derived tables after an adapter upgrade, or check a commit for raw paths in CI:
+Rebuild derived tables after an adapter upgrade, check a commit for raw paths in CI, or record a performance baseline:
 ```
-traj derive -S <store>            traj hook check-tree HEAD
+traj derive -S <store>            traj hook check-tree HEAD            traj bench --store <store> --out review-bench/history/
 ```
 
 Analyse with SQL (DuckDB; views: `files`, `dirs`, `blobs`, `excluded`, `events` and other `derived/*` tables; functions `blob(sha)`, `text(sha)`; several `-S` register a `store` column):
@@ -64,25 +64,28 @@ traj sql -S <store> "<query>"
 
 ## Worked examples
 
-Rounds whose review is not DONE, with the reviewer's verdict line:
+Each block is one command; `S` is a store path or id. They are executed against a fixture store by trajfs's tests,
+so every one of them is known to run.
+
+Reviews per round, with the verdict field of each review record:
 ```
-traj sql -S S "select attrs['round'] r, json_extract_string(text(sha),'$.verdict') v from files where name='review.json' and attrs['role']='reviewer' order by r::int"
+traj sql -S S "select attrs['round'] r, json_extract_string(text(sha),'$.verdict') v from files where name='review.json' and attrs['role']='reviewer' order by r"
 ```
 Tool calls that failed in one trajectory:
 ```
-traj sql -S S "select seq, tool_name, exit_code, substr(payload_json,1,200) from events where trajectory='rounds/round-0037/builder/call/events.jsonl' and exit_code is not null and exit_code<>0 order by seq"
+traj sql -S S "select seq, tool_name, exit_code, substr(payload_json,1,120) from events where trajectory='rounds/round-0001/builder/events.jsonl' and exit_code is not null and exit_code<>0 order by seq"
 ```
-Bytes and file counts per round (deduplicated):
+Paths, distinct blobs and bytes per round:
 ```
-traj sql -S S "select attrs['round'] r, count(*) paths, count(distinct sha) blobs, sum(size) bytes from files group by 1 order by r::int"
+traj sql -S S "select attrs['round'] r, count(*) paths, count(distinct sha) blobs, sum(size) bytes from files group by 1 order by r"
 ```
-Which rounds' final test output contains FAILED:
+Which stdout/stderr files mention a traceback:
 ```
-traj grep -S S -e 'FAILED' --name 'round*-final-test.stdout' -l
+traj grep -S S -l -e Traceback --name '*.std*'
 ```
-Compare two rounds' reviews side by side:
+One round's review directory as real files, for an editor or a diff:
 ```
-traj extract -S S rounds/round-0036/reviewer /tmp/r36 && traj extract -S S rounds/round-0037/reviewer /tmp/r37 && diff -u /tmp/r36/review.json /tmp/r37/review.json
+traj extract -S S rounds/round-0001/reviewer /tmp/traj-r1
 ```
 
 ## Adapter (this repo's own; trajfs has no knowledge of any runner)

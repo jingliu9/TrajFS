@@ -27,6 +27,7 @@ duckdb = { version = "1", features = ["bundled", "vscalar", "vscalar-arrow"], op
 [features]
 default = ["sql"]
 sql = ["dep:duckdb"]
+# real-dataset tests (T6, T7): need TRAJ_SLOW_SRC (a run directory) and TRAJ_SLOW_ADAPTER (its adapter TOML)
 slow = []
 
 [dev-dependencies]
@@ -35,3 +36,9 @@ tempfile.workspace = true
 walkdir.workspace = true
 sha2.workspace = true
 hex.workspace = true
+proptest.workspace = true
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "verbs"
+harness = false

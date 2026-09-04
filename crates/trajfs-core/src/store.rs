@@ -171,11 +171,8 @@ impl Store {
         hi.push(0);
         let mut found: Option<FileRow> = None;
         for seg in &self.files_segments {
-            catalog::scan_files(seg, Some((&lo, &hi)), true, |r| {
-                if r.path == path {
-                    found = Some(r);
-                }
-            })?;
+            // only the matching row is materialised; the row group is located through the path statistics
+            catalog::scan_files_filtered(seg, Some((&lo, &hi)), true, |p| p == path, |r| found = Some(r))?;
         }
         Ok(found)
     }
@@ -200,7 +197,19 @@ impl Store {
             })?;
         }
         let mut files: Vec<FileRow> = Vec::new();
-        self.scan_under(dir, true, |p| crate::parent_of(p) == dir, |r| files.push(r))?;
+        if self.files_segments.len() <= 1 {
+            for seg in &self.files_segments {
+                catalog::scan_direct_children(seg, dir, true, |r| files.push(r))?;
+            }
+        } else {
+            let mut m: BTreeMap<Vec<u8>, FileRow> = BTreeMap::new();
+            for seg in &self.files_segments {
+                catalog::scan_direct_children(seg, dir, true, |r| {
+                    m.insert(r.path.as_bytes().to_vec(), r);
+                })?;
+            }
+            files = m.into_values().collect();
+        }
         Ok((subs.into_values().collect(), files))
     }
 
@@ -274,7 +283,8 @@ impl Store {
         };
         let strip = if prefix.is_empty() { 0 } else { prefix.len() + 1 };
         let mut reader = self.reader();
-        let mut first_path: HashMap<Sha, PathBuf> = HashMap::new();
+        // hard links share the inode, hence the mode: only identical (content, mode) pairs may be linked
+        let mut first_path: HashMap<(Sha, u16), PathBuf> = HashMap::new();
         let mut n = 0u64;
         for r in &rows {
             let rel = if rows.len() == 1 && r.path == prefix { crate::basename_of(&r.path).to_string() } else { r.path[strip..].to_string() };
@@ -295,7 +305,7 @@ impl Store {
                 }
                 Kind::File => {
                     if hardlink_dedupe {
-                        if let Some(src) = first_path.get(&r.sha) {
+                        if let Some(src) = first_path.get(&(r.sha, r.mode)) {
                             let _ = std::fs::remove_file(&out);
                             std::fs::hard_link(src, &out)?;
                             n += 1;
@@ -312,7 +322,7 @@ impl Store {
                     drop(f);
                     std::fs::set_permissions(&out, std::fs::Permissions::from_mode(r.mode as u32))?;
                     if hardlink_dedupe {
-                        first_path.insert(r.sha, out.clone());
+                        first_path.insert((r.sha, r.mode), out.clone());
                     }
                 }
             }

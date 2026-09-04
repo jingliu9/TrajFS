@@ -1,0 +1,5 @@
+{"event":"start","ts":1756947600,"id":"e1"}
+{"kind":"tool","time":"2026-09-04T01:00:01Z","tool_name":"grep","returncode":0,"extra":{"a":1}}
+{"type":"end","timestamp":1756947602000,"parent_id":"e1","role":"assistant"}
+{"nothing":"recognisable"}
+garbage line

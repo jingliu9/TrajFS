@@ -38,13 +38,15 @@ fn looks_binary(b: &[u8]) -> bool {
 
 pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
     let st = one_store(stores)?;
-    let pats: Vec<String> = a.patterns.iter().map(|p| if a.ignore_case { format!("(?i){p}") } else { p.clone() }).collect();
+    // (?m): ^ and $ anchor at line boundaries, as in grep
+    let pats: Vec<String> = a.patterns.iter().map(|p| format!("(?m){}{p}", if a.ignore_case { "(?i)" } else { "" })).collect();
     let set = RegexSet::new(&pats)?;
     let name_g = a.name.as_deref().map(|g| Glob::new(g)).transpose()?.map(|g| g.compile_matcher());
     let dir = norm(&a.path);
     let mut by_sha: HashMap<Sha, Vec<String>> = HashMap::new();
     st.scan_under(&dir, false, |p| name_g.as_ref().map(|g| g.is_match(trajfs_core::basename_of(p))).unwrap_or(true), |r| {
-        if r.kind != trajfs_core::Kind::Empty {
+        // symlinks hold a target string, not content; grep -r skips them too
+        if r.kind == trajfs_core::Kind::File {
             by_sha.entry(r.sha).or_default().push(r.path);
         }
     })?;
@@ -71,7 +73,9 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
             continue;
         }
         let mut lines: Vec<(usize, &[u8])> = Vec::new();
-        for (i, line) in bytes.split(|&c| c == b'\n').enumerate() {
+        // a trailing newline terminates the last line; it does not start an empty one
+        let body = if bytes.last() == Some(&b'\n') { &bytes[..bytes.len() - 1] } else { &bytes[..] };
+        for (i, line) in body.split(|&c| c == b'\n').enumerate() {
             if set.is_match(line) {
                 lines.push((i + 1, line));
             }

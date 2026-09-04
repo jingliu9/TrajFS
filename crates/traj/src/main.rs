@@ -58,6 +58,8 @@ enum Cmd {
     Skill(cmd::skill::SkillArgs),
     /// Git hook entry points (also reached when the binary is invoked as `pre-commit`)
     Hook(cmd::hook::HookArgs),
+    /// Measure pack and verb timings; write the regression-baseline JSON
+    Bench(cmd::bench::BenchArgs),
 }
 
 fn main() {
@@ -105,6 +107,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Commit(a) => cmd::commit::run(a),
         Cmd::Skill(a) => cmd::skill::run(a),
         Cmd::Hook(a) => cmd::hook::run(a),
+        Cmd::Bench(a) => cmd::bench::run(a),
     }
 }
 

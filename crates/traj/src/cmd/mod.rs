@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod browse;
 pub mod commit;
 pub mod derive;

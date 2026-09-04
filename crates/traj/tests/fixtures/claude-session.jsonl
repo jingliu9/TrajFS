@@ -1,0 +1,5 @@
+{"type":"mode","mode":"normal","sessionId":"s1"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"list the files"},"uuid":"u1","timestamp":"2026-09-04T01:00:00.000Z","sessionId":"s1"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Listing."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"uuid":"a1","timestamp":"2026-09-04T01:00:01.000Z","sessionId":"s1"}
+{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]},"uuid":"u2","timestamp":"2026-09-04T01:00:02.000Z","sessionId":"s1"}
+{"type":"system","subtype":"info","content":"done","uuid":"s2","timestamp":"2026-09-04T01:00:03.000Z"}
