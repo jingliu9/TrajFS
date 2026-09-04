@@ -51,7 +51,8 @@ pub fn pre_commit() -> Result<i32> {
     let cfg = Config::find_from(&repo);
     let (max_paths, max_bytes) = cfg.as_ref().map(|c| (c.file.hook.max_added_paths, c.file.hook.max_file_bytes)).unwrap_or((10_000, 64 << 20));
     let added = git_lines(&repo, &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"])?;
-    let all = git_lines(&repo, &["diff", "--cached", "--name-only", "-z"])?;
+    // additions, modifications, copies and renames: deletions of raw paths are the migration and stay allowed
+    let all = git_lines(&repo, &["diff", "--cached", "--name-only", "--diff-filter=AMCR", "-z"])?;
     let re = raw_run_regex(cfg.as_ref())?;
     let mut problems: Vec<String> = Vec::new();
     if added.len() > max_paths {

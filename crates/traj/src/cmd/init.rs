@@ -170,7 +170,7 @@ pub fn doctor() -> Result<i32> {
     if tracked.is_empty() {
         println!("tracked:     no raw-run paths tracked in git");
     } else {
-        println!("tracked:     PROBLEM {} raw-run paths are tracked in git, e.g. {}", tracked.len(), tracked[0]);
+        println!("tracked:     PROBLEM {}{} raw-run paths are tracked in git (migrate: `git rm -r --cached <dir>` is allowed by the hook), e.g. {}", if tracked.len() >= 1000 { "at least " } else { "" }, tracked.len(), tracked[0]);
         problems += 1;
     }
     // stores

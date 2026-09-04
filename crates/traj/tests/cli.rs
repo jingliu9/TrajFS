@@ -234,6 +234,13 @@ fn t9b_separation_and_hook() {
     assert!(!out.status.success(), "commit of raw paths must be refused");
     assert!(String::from_utf8_lossy(&out.stderr).contains("traj pack"));
     git(&["reset", "-q"]);
+    // deleting tracked raw paths (the migration) is allowed
+    fs::create_dir_all(repo.join("old/rounds/round-0001")).unwrap();
+    fs::write(repo.join("old/rounds/round-0001/y.stdout"), "y").unwrap();
+    git(&["add", "old"]);
+    git(&["-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "legacy raw tree"]);
+    git(&["rm", "-r", "-q", "--cached", "old"]);
+    git(&["commit", "-q", "-m", "migrate: stop tracking raw tree"]);
     // the intended path: pack into store_root, traj commit
     traj().current_dir(&repo).args(["pack"]).arg(data.join("run1")).args(["--label", "r1"]).assert().success();
     let store = repo.join("stores/run1.trajstore");
