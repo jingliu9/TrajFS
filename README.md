@@ -192,7 +192,7 @@ traj -S S sql "select path, json_extract_string(text(sha),'$.verdict') from file
 ## Testing
 
 ```
-cargo test --release                                            # 59 tests, ~15 s: format, round trips (proptest),
+cargo test --release                                            # format, round trips (proptest),
                                                                 # integrity, catalog verbs vs ls/find/du, grep vs grep,
                                                                 # events, SIGKILL recovery, watch, hook, skill examples,
                                                                 # the FUSE mount (T10, skipped without /dev/fuse)
