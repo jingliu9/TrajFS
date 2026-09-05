@@ -1,52 +1,43 @@
-# TrajFS
+<p align="center">
+  <img src="docs/trajfs-logo.png" alt="TrajFS logo" width="400">
+</p>
 
-**Millions of agent files. One compact store. Still read like files.**
+# TrajFS: Make millions of AI-agent trajectory files gittable.
 
-TrajFS archives agent run directories without turning your Git repository into millions of tiny files. Keep logs,
-tool calls, reviews, and repeated workspace snapshots in a compact, deduplicated store, then browse them with
-file-like commands, query them with SQL, or open them in VS Code through a read-only mount.
+**Faster for Git. Friendly to agents. Still files for humans.**
 
-Built for **coding-agent runs, multi-agent experiments, and evaluation grids**. Your runner still writes ordinary
-files; TrajFS handles their archival and analysis. One Rust binary, `traj`. No database server or cloud service.
+AI-agent runs produce millions of tiny, duplicate-heavy files, making Git operations take hours. These trajectories
+are not *gittable*! By *gittable*, we mean practical to manage with Git. TrajFS is a plugin that makes trajectories
+gittable without changing the agents, while keeping the files viewable by both agents and humans.
 
-Recorded Rust results: **2.14 million retained paths packed in 118 seconds**, with **about 481 MB of packs and
-catalogs for 12.0 GB of retained content**. That is roughly **25x less storage before optional event tables**.
-[See the workloads, timings, and measurement limits below.](#benchmarks)
+Concretely, TrajFS bridges agent-generated files and Git-style management. Generating agents still write files.
+Analysis agents get compacted, queryable trajectories that Git can manage. Humans examine the files through commands
+and editors such as VS Code. The result: faster for Git, friendly to AI agents, and still files for humans.
 
-[Why TrajFS?](#why-trajfs) | [Quick start](#quick-start) | [Benchmarks](#benchmarks) |
-[Installation](#installation) | [How it works](#how-it-works)
+![TrajFS interfaces for generating agents, analysis agents, Git, and humans.](tasks/task1-r1.png)
 
-## Why TrajFS?
+Generating agents still write files. Analysis agents get compacted, queryable trajectories. Humans still inspect files with familiar tools.
 
-An agent run is rarely just one conversation. Each round can leave behind stdout, status markers, tool results,
-JSONL event streams, source trees, and another snapshot of almost the same workspace.
+---
 
-**The headache is not just the bytes. It is the paths.** Git has to track each one, editors crawl them, and recursive
-searches reread the same content across snapshots. A compressed tarball reduces the file count, but makes it harder
-to inspect one file, compare rounds, or append new results.
-
-TrajFS separates the directory tree you want to read from the physical files you need to store:
-
-- **Keep Git manageable.** Pack many logical paths into a small set of bounded-size artifacts.
-- **Stop storing and searching duplicates.** Identical file content is stored once per store; `traj grep` searches
-  distinct content and maps matches back to every matching path.
-- **Keep familiar tools.** Use `traj ls`, `find`, `cat`, and `extract`, or mount the tree for ordinary file readers.
-- **Ask questions across runs.** Query paths, content hashes, custom attributes, and parsed events with embedded SQL.
-
-TrajFS is an archive for run evidence, not a writable replacement for your agent's working directory.
+[Quick start](#quick-start) | [Benchmarks](#benchmarks) | [Installation](#installation) | [How it works](#how-it-works)
 
 ## Quick start
 
-[Install `traj`](#installation) first. You can pack an existing run without setting up Git integration.
-These examples use `/data/runs/run-42` and a rounds-style layout; replace the source and example file paths with yours.
+[Install `traj`](#installation) first. These examples archive one task execution, `task-a`. A **round** is one
+iteration of agent work and review; `reviewer/review.json` is the reviewing agent's output.
 
-### Pack, find, and read a run
+Replace the example paths with yours; TrajFS does not require this layout. A store contains the source tree you pass
+to `pack`. Prefer keeping all agents and rounds of one task execution together.
+[More on store granularity.](tasks/granularity.md)
+
+### Pack, find, and read a task
 
 ```bash
-traj pack /data/runs/run-42 --out stores/run-42.trajstore \
+traj pack /data/tasks/task-a --out stores/task-a.trajstore \
   --adapter copilot-cli --rules none
 
-export TRAJ_STORE="$PWD/stores/run-42.trajstore"
+export TRAJ_STORE="$PWD/stores/task-a.trajstore"
 
 traj ls -l
 traj tree --depth 2
@@ -60,6 +51,9 @@ traj verify --deep
 `TRAJ_STORE` selects the store for reading commands; `-S <store-path>` overrides it. Packing leaves the source tree
 in place. Run `pack` again with the same source and destination to append new or changed entries without rewriting
 old packs. If `pack` reports errors, do not treat the resulting store as a complete archive.
+
+No Git setup is required for these commands. `traj grep` searches each distinct stored content once and reports
+matches at all matching paths, rather than rereading every duplicate file.
 
 **Choose retention deliberately.** `--rules none` disables exclusions. The default `no-build-products` profile
 excludes common build products and caches; custom TOML rules are also supported. Exclusion records and reasons are
@@ -83,10 +77,10 @@ authoritative original. See `traj <command> --help` for each command's options.
 On Linux with FUSE (Filesystem in Userspace), mount the selected store without extracting it:
 
 ```bash
-traj mount "$HOME/traj-mnt/run-42" --daemon
-ls "$HOME/traj-mnt/run-42"
-code -r "$HOME/traj-mnt/run-42"          # Optional: open in VS Code
-traj umount "$HOME/traj-mnt/run-42"
+traj mount "$HOME/traj-mnt/task-a" --daemon
+ls "$HOME/traj-mnt/task-a"
+code -r "$HOME/traj-mnt/task-a"          # Optional: open in VS Code
+traj umount "$HOME/traj-mnt/task-a"
 ```
 
 The mountpoint must be empty and, by default, outside every Git worktree. Files are **read-only**; newly packed
@@ -94,7 +88,7 @@ batches become visible without remounting. Use `--memory 2G` to set a best-effor
 20% of system RAM.
 
 Mounting also updates available VS Code host settings to exclude the tree from file watching and mark it read-only.
-Use `--no-vscode` to leave those settings untouched. For whole-run searches, prefer `traj grep` or `traj sql`:
+Use `--no-vscode` to leave those settings untouched. For whole-store searches, prefer `traj grep` or `traj sql`:
 ordinary recursive tools still traverse every mounted path.
 
 For writable files, extract into a new destination outside Git:
@@ -106,7 +100,7 @@ traj extract rounds/round-0001 /tmp/traj-round-0001
 `traj edit <path>` opens a temporary copy in `$EDITOR` and prints a diff; it never writes back into the store.
 You do not need FUSE for any of these native CLI commands.
 
-### Query events and compare runs
+### Query events and compare tasks
 
 With the `copilot-cli` adapter from the quick start:
 
@@ -119,10 +113,11 @@ traj sql "
   ORDER BY calls DESC"
 ```
 
-After packing another run, repeat `-S` to query both stores:
+After packing another task, repeat `-S` to query both stores. Here, `sha` is a content hash: identical contents share
+the same value.
 
 ```bash
-traj -S stores/run-42.trajstore -S stores/run-43.trajstore sql "
+traj -S stores/task-a.trajstore -S stores/task-b.trajstore sql "
   SELECT store, count(*) AS recorded_paths, count(DISTINCT sha) AS distinct_contents
   FROM files
   GROUP BY store
@@ -139,11 +134,11 @@ rebuilds events from the latest retained trajectories; `pack --no-derive` and `w
 
 ### Automate archival and commit stores, not raw trees
 
-For a Git-backed experiment repository, keep two separate roots. This example uses a different run root and store
+For a Git-backed experiment repository, keep two separate roots. This example uses a different source root and store
 from the quick start:
 
 ```text
-/data/experiment-runs/      Raw run trees, outside every Git worktree
+/data/experiments/          Raw task directories, outside every Git worktree
 <experiment-repo>/stores/   Packed stores, the form you commit
 ```
 
@@ -167,7 +162,7 @@ globs = ["**/events.jsonl"]
 format = "copilot-cli"
 
 [batch_ready]
-run_glob = "run-*"
+run_glob = "task-*"
 markers = ["rounds/round-*/DONE"]
 label_ancestor_pattern = '^round-\d+$'
 
@@ -176,15 +171,16 @@ raw_patterns = ['(^|/)rounds/round-\d+/']
 ```
 
 Named regex groups become `files.attrs` keys, such as `round` and `role`. Adjust the event format, directory layout,
-and completion markers to your runner. A marker triggers packing of the run tree; it does not restrict the batch to
-that round's directory.
+and completion markers to your runner. Despite its name, `run_glob` here selects task directories such as `task-1`.
+A `DONE` file triggers a capture of the task tree; it does not restrict that capture to one round or mean the whole
+task has finished.
 
 </details>
 
 From that experiment repository, initialize the integration and commit its configuration once:
 
 ```bash
-traj init --data-root /data/experiment-runs --store-root stores \
+traj init --data-root /data/experiments --store-root stores \
   --adapter trajfs/adapter.toml --rules none
 traj doctor
 
@@ -201,8 +197,8 @@ scaffolded rule template's 20 MiB file-size cutoff.
 With a Git remote configured, archive manually or watch for completed rounds:
 
 ```bash
-traj pack /data/experiment-runs/run-1 --label round-0001 &&
-  traj commit --push stores/run-1.trajstore
+traj pack /data/experiments/task-1 --label round-0001 &&
+  traj commit --push stores/task-1.trajstore
 
 # Or keep packing and committing when new completion markers appear:
 traj watch --commit --push
@@ -212,10 +208,10 @@ traj watch --commit --push
 Git content, rejecting configured raw-run paths, incomplete stores, and oversized artifacts. Defaults allow at most
 10,000 added paths per commit and 65 MiB per file. `traj hook check-tree HEAD` checks a committed tree.
 
-For nested runs, store IDs encode the data-root-relative path so matching basenames do not collide. In a configured
-repository, `traj mount <mountpoint>` without a store selection mounts all stores under `store_root`; unset
-`TRAJ_STORE` first if you exported it above. Add `--save` to remember the mountpoint and write repository-level
-VS Code settings.
+For nested source directories, default store paths encode the data-root-relative path so matching basenames do not
+collide. In a configured repository, `traj mount <mountpoint>` without a store selection mounts all stores under
+`store_root`; unset `TRAJ_STORE` first if you exported it above. Add `--save` to remember the mountpoint and write
+repository-level VS Code settings.
 
 ## Benchmarks
 
@@ -223,37 +219,41 @@ These are **previously recorded measurements**, not reruns against the latest re
 rules, duplication, hardware, and cache state; storage reduction is not a runtime speedup. The saved Rust report does
 not include a complete hardware/software inventory or confidence intervals.
 
-### Four-lane experiment: recorded Rust results
+### Example task archives
 
-The [Rust implementation report, section 14](docs/PLAN.md) records these results from the `onesw` fourth-grid agent
-experiment on **2026-09-04**. Three lanes were measured; **rank 2 ran on another host and was not measured**.
+These archives contain agent logs, status files, reviews, and workspace snapshots accumulated over many rounds.
+**Task A-D are readable aliases for the recorded datasets**, not new measurements.
+The [implementation report, section 14](docs/PLAN.md) records the results on **2026-09-04**; Task B was not measured.
 
-| Lane / recorded label | Retained paths | Retained content | Packs + catalog | Pack | Deep verify |
+| Example archive | Retained paths | Retained content | Packs + catalog | Pack | Deep verify |
 |---|---:|---:|---:|---:|---:|
-| Rank 1: `claude-opus-4.8` | 2,140,904 | 12.0 GB | ~481 MB | 118 s | 21 s |
-| Rank 2: another host | Not measured | -- | -- | -- | -- |
-| Rank 3: `claude-opus-4.6-1m` | 1,868,148 | 5.9 GB | ~451 MB | 75 s | 16 s |
-| Rank 4: `gpt-5.5-GLihDpe` | 699,040 | 4.7 GB | ~362 MB | 55 s | 13 s |
+| Task A | 2,140,904 | 12.0 GB | ~481 MB | 118 s | 21 s |
+| Task B | Not measured | -- | -- | -- | -- |
+| Task C | 1,868,148 | 5.9 GB | ~451 MB | 75 s | 16 s |
+| Task D | 699,040 | 4.7 GB | ~362 MB | 55 s | 13 s |
 
-The table uses the report's rounded MB/GB units. Packs + catalog **exclude optional derived events**, which add
-359 MB, 251 MB, and 269 MB for ranks 1, 3, and 4 respectively. Use `--no-derive` when you only need the core archive.
+Retained paths are the archived file entries; retained content is their total size after filtering.
+Packs + catalog is the archive footprint **before optional parsed event tables**, which add 359 MB, 251 MB, and
+269 MB for Tasks A, C, and D respectively. Sizes use the report's rounded MB/GB units. Use `--no-derive` when you only
+need the core archive.
 
 The core stores are roughly **13-25x smaller than the retained content**. This comparison starts **after retention
-filtering**; discarded build products are not counted as compression savings. Rank 1 records **23,685 distinct
-blobs** and **at most 20 non-derived store files** instead of over two million logical paths.
+filtering**; discarded build products are not counted as compression savings. Task A records **23,685 distinct
+stored contents** and **at most 20 non-derived store files** instead of over two million logical paths.
 
-For a smaller unit of work, rank 1's **round 37** contained **105,940 retained paths / 450 MB**, packed into about
-**18.6 MB in 3.1 s**. That round is a sample of rank 1, not a fourth measured lane.
+For a smaller sample, one round of Task A contained **105,940 retained paths / 450 MB**, packed into about
+**18.6 MB in 3.1 s**. This is a subset of Task A, not another whole-task result.
 
 ### Reading and querying the million-path store
 
-The same report records these **warm-cache, whole-process** timings on rank 1:
+The same report records these timings on Task A. **Warm-cache** means the operating system could reuse data already
+in memory; **whole-process** includes starting the CLI, not just its internal lookup.
 
 | Task | Recorded time |
 |---|---:|
 | List one directory | 70 ms |
 | `stat` or `cat` one file | 40 ms |
-| Find `COMPLETE` by filename, about 133,000 hits | 430 ms |
+| Find a completion-marker filename (`COMPLETE`), about 133,000 hits | 430 ms |
 | SQL file counts/bytes grouped by round | 180 ms |
 | SQL tool-call counts over 3.9 million event rows | 70 ms |
 | SQL `text(sha)` on 76 review records | 800 ms |
@@ -284,7 +284,7 @@ Prepare a store with explicit retention and adapter settings, then record timing
 
 ```bash
 mkdir -p review-bench/history
-traj -S stores/run-42.trajstore bench \
+traj -S stores/task-a.trajstore bench \
   --ls-dir rounds/round-0001 \
   --file rounds/round-0001/reviewer/review.json \
   --find-name review.json \
@@ -352,7 +352,7 @@ identical contents share storage even when they appear under different paths or 
 A store is a portable directory:
 
 ```text
-run-42.trajstore/
+task-a.trajstore/
   MANIFEST.json                Published batches and artifact inventory
   catalog/*.parquet            Paths, directory summaries, exclusions
   packs/*.pack                 Compressed content
@@ -373,7 +373,7 @@ limit and 60 MiB; large tables and content are split into physical segments.
 - **Live runs are per-file checkpoints.** Ingestion binds each file to a captured inode and byte prefix. It does not
   produce an atomic snapshot of an entire changing run; pause the runner when you need that guarantee.
 - **Append-oriented history.** Removed source paths and newly excluded files are not purged from existing archives.
-  There is no in-place editing or `traj compact` command.
+  There is no in-place editing or `traj compact` command. [Task-scoped deletion is planned, not implemented.](tasks/PLAN-deletion.md)
 - **Files, not full backup metadata.** Supported entries are regular files, empty files, and symlink targets under
   UTF-8 paths. Regular-file modes normalize to 0644/0755 according to executable bits. Empty directories, ownership,
   ACLs, original xattrs, and special files are not preserved; `extract --mtime` restores recorded file timestamps.
@@ -401,4 +401,8 @@ skip when the host lacks FUSE; real-dataset cases are opt-in through the `slow` 
 documented in [the test plan](docs/PLAN.md).
 
 Further reading: [design and test plan](docs/PLAN.md), [storage approach comparison](docs/idea-review.md),
-[FUSE design and measurements](docs/PLAN-fuse.md), and [why a mount instead of an editor extension](docs/vscode-viewer.md).
+[store granularity](tasks/granularity.md), [FUSE design and measurements](docs/PLAN-fuse.md), and
+[why a mount instead of an editor extension](docs/vscode-viewer.md).
+
+Diagram files: [vector PDF](tasks/task1-r1.pdf), [LuaLaTeX source](tasks/task1-r1.tex),
+[icon credits](tasks/task1-r1-icons-LICENSE.txt), and [font license](tasks/fonts/barlow-semi-condensed/OFL.txt).

@@ -1,0 +1,40 @@
+Icon credits for task1-r1.tex, task1-r1.pdf, and task1-r1.png
+
+The robot, document, and people icons are redrawn adaptations of Lucide
+icons and the supplied visual reference. They are rendered as TikZ vector
+paths, with adjusted silhouettes, stroke weights, and colors.
+
+Lucide sources:
+https://github.com/lucide-icons/lucide/blob/main/icons/bot.svg
+https://github.com/lucide-icons/lucide/blob/main/icons/file-text.svg
+https://github.com/lucide-icons/lucide/blob/main/icons/users-round.svg
+License: https://github.com/lucide-icons/lucide/blob/main/LICENSE
+
+ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Git mark
+
+Git Logo by Jason Long is licensed under Creative Commons Attribution
+3.0 Unported (CC BY 3.0). This figure redraws the mark as rounded TikZ
+paths, with an orange fill and white branch marks to match the reference.
+
+Source and attribution: https://git-scm.com/community/logos
+Original SVG: https://git-scm.com/images/logos/downloads/Git-Icon-1788C.svg
+License: https://creativecommons.org/licenses/by/3.0/
+
+The stacked database icon is drawn directly with geometric TikZ paths.
+Keep these credits with redistributed copies of the figure and its source.

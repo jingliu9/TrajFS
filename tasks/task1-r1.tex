@@ -1,0 +1,199 @@
+% Build from tasks/ with: lualatex task1-r1.tex
+\documentclass[11pt]{article}
+\usepackage[a4paper,landscape,margin=10mm]{geometry}
+\usepackage{fontspec}
+\usepackage{tikz}
+\usepackage[active,tightpage]{preview}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\setsansfont{BarlowSemiCondensed}[
+  Path=fonts/barlow-semi-condensed/,
+  UprightFont=*-Medium.ttf,
+  BoldFont=*-SemiBold.ttf
+]
+\renewcommand{\familydefault}{\sfdefault}
+\PreviewEnvironment{tikzpicture}
+\setlength{\PreviewBorder}{6pt}
+\pagestyle{empty}
+\pdfextension info {
+  /Title (TrajFS workflow)
+  /Subject (Icons: Lucide, ISC; Git logo by Jason Long, CC BY 3.0. Font: Barlow Semi Condensed, SIL OFL 1.1. Licenses accompany the source.)
+}
+
+\definecolor{ink}{HTML}{101827}
+\definecolor{flowink}{HTML}{262D3A}
+\definecolor{bluefill}{RGB}{227,240,254}
+\definecolor{blueline}{RGB}{119,184,249}
+\definecolor{grayfill}{RGB}{239,241,245}
+\definecolor{grayline}{RGB}{132,144,162}
+\definecolor{greenfill}{RGB}{225,253,236}
+\definecolor{greenline}{RGB}{47,121,70}
+\definecolor{purplefill}{RGB}{232,231,253}
+\definecolor{purpleline}{RGB}{200,192,251}
+\definecolor{pinkfill}{RGB}{254,228,230}
+\definecolor{pinkline}{RGB}{249,172,174}
+\definecolor{amberfill}{RGB}{255,247,230}
+\definecolor{amberline}{RGB}{253,217,154}
+\definecolor{databasegreen}{HTML}{25813F}
+\definecolor{gitorange}{HTML}{F05032}
+
+% The icons are vector paths, not raster images. Credits are in
+% task1-r1-icons-LICENSE.txt.
+\tikzset{
+  icon coordinates/.style={
+    x=0.4mm, y=-0.4mm, shift={(-12,-12)}
+  },
+  icon stroke/.style={
+    draw=ink, line width=1.5pt, line cap=round, line join=round
+  },
+  pics/robot/.style={code={
+    \begin{scope}[icon coordinates]
+      \draw[icon stroke] (12,7) -- (12,3);
+      \fill[ink] (12,2) circle[radius=0.72mm];
+      \draw[icon stroke, rounded corners=0.7mm]
+        (4,8) rectangle (20,21);
+      \draw[icon stroke, rounded corners=0.35mm]
+        (4,12) -- (1,12) -- (1,17) -- (4,17)
+        (20,12) -- (23,12) -- (23,17) -- (20,17);
+      \fill[ink] (9,13) circle[radius=0.36mm];
+      \fill[ink] (15,13) circle[radius=0.36mm];
+      \draw[icon stroke] (10,17) -- (10,18) -- (14,18) -- (14,17);
+    \end{scope}
+  }},
+  pics/document/.style={code={
+    \begin{scope}[icon coordinates]
+      \draw[icon stroke, rounded corners=0.45mm]
+        (14,2) -- (5,2) -- (5,22) -- (20,22) -- (20,8) -- cycle;
+      \draw[icon stroke] (14,2) -- (14,8) -- (20,8);
+      \draw[icon stroke]
+        (8,12) -- (17,12)
+        (8,16) -- (17,16)
+        (8,19) -- (14,19);
+    \end{scope}
+  }},
+  pics/database/.style={code={
+    \begin{scope}[x=0.45mm,y=-0.45mm,shift={(-12,-12)}]
+      \path[fill=databasegreen]
+        (4,5) -- (4,19)
+        .. controls (4,23) and (20,23) .. (20,19)
+        -- (20,5) -- cycle;
+      \path[fill=databasegreen]
+        (12,5) ellipse[x radius=3.6mm,y radius=1.35mm];
+      \draw[white,line width=1.15pt,line cap=round]
+        (4,5) .. controls (4,9) and (20,9) .. (20,5)
+        (4,11) .. controls (4,15) and (20,15) .. (20,11)
+        (4,17) .. controls (4,21) and (20,21) .. (20,17);
+    \end{scope}
+  }},
+  pics/gitmark/.style={code={
+    \begin{scope}[icon coordinates]
+      \path[fill=gitorange,rounded corners=0.6mm]
+        (12,0) -- (24,12) -- (12,24) -- (0,12) -- cycle;
+      \begin{scope}
+        \clip[rounded corners=0.6mm]
+          (12,0) -- (24,12) -- (12,24) -- (0,12) -- cycle;
+        \draw[white,line width=1.65pt,line cap=round]
+          (7.4,2.4) -- (17.1,12.1)
+          (12.1,7.1) -- (12.1,17.1);
+        \fill[white] (12.1,7.1) circle[radius=0.73mm];
+        \fill[white] (17.1,12.1) circle[radius=0.73mm];
+        \fill[white] (12.1,17.1) circle[radius=0.73mm];
+      \end{scope}
+    \end{scope}
+  }},
+  pics/people/.style={code={
+    \begin{scope}[icon coordinates]
+      \draw[icon stroke] (8,6) circle[radius=1.6mm];
+      \draw[icon stroke] (18,7) circle[radius=1.2mm];
+      \draw[icon stroke,rounded corners=0.45mm]
+        (1.5,21.5) -- (1.5,18.5)
+        .. controls (1.5,14) and (14.5,14) .. (14.5,18.5)
+        -- (14.5,21.5) -- cycle;
+      \draw[icon stroke,rounded corners=0.45mm]
+        (17,13) .. controls (21,13) and (22.5,15) .. (22.5,18)
+        -- (22.5,20) -- (18,20);
+    \end{scope}
+  }}
+}
+
+\begin{document}
+\noindent
+\begin{tikzpicture}[
+  card/.style={
+    rounded corners=2mm,
+    line width=0.8pt,
+    inner sep=0pt,
+    minimum height=22mm
+  },
+  heading/.style={
+    anchor=west,
+    align=left,
+    inner sep=0pt,
+    text=ink,
+    font=\fontsize{15}{17}\selectfont\bfseries
+  },
+  interface/.style={
+    inner sep=0pt,
+    align=center,
+    text=ink,
+    font=\fontsize{13.5}{16.5}\selectfont
+  },
+  flow/.style={
+    draw=flowink,
+    line width=0.95pt,
+    line cap=round,
+    -{Stealth[length=2.6mm,width=2mm]}
+  }
+]
+  \node[card,draw=blueline,fill=bluefill,minimum width=40mm]
+    (generators) {};
+  \node[card,draw=grayline,fill=grayfill,minimum width=38mm,
+    right=28mm of generators] (files) {};
+  \node[card,draw=greenline,fill=greenfill,minimum width=50mm,
+    minimum height=28mm,right=31mm of files] (trajfs) {};
+
+  \node[card,draw=pinkline,fill=pinkfill,minimum width=42mm,
+    right=45mm of trajfs] (git) {};
+  \node[card,draw=purpleline,fill=purplefill,minimum width=42mm,
+    above=7mm of git] (analysis) {};
+  \node[card,draw=amberline,fill=amberfill,minimum width=42mm,
+    below=7mm of git] (humans) {};
+
+  \pic at ($(generators.west)+(7.5mm,0)$) {robot};
+  \node[heading] at ($(generators.west)+(14.5mm,0)$)
+    {Generating\\agents};
+  \pic at ($(files.west)+(7.5mm,0)$) {document};
+  \node[heading] at ($(files.west)+(13.5mm,0)$)
+    {Trajectory\\files};
+
+  \pic at ($(trajfs.west)+(14mm,6mm)$) {database};
+  \node[heading,font=\fontsize{21.75}{24}\selectfont\bfseries]
+    at ($(trajfs.west)+(22mm,6mm)$) {TrajFS};
+  \node[interface,font=\fontsize{14.25}{17}\selectfont]
+    at ($(trajfs.center)+(0,-5.5mm)$) {compacted and\\queryable};
+
+  \pic at ($(analysis.west)+(7.5mm,0)$) {robot};
+  \node[heading] at ($(analysis.west)+(15mm,0)$) {Analysis\\agents};
+  \pic at ($(git.west)+(7.5mm,0)$) {gitmark};
+  \node[heading] at ($(git.west)+(15mm,0)$) {Git};
+  \pic at ($(humans.west)+(7.5mm,0)$) {people};
+  \node[heading] at ($(humans.west)+(15mm,5mm)$) {Humans};
+  \node[interface,anchor=west,align=left,font=\fontsize{9.75}{12}\selectfont]
+    at ($(humans.west)+(15mm,-3mm)$) {commands and\\VS Code};
+
+  \draw[flow] (generators.east)
+    -- node[interface,above=2.3mm] {write ordinary\\files} (files.west);
+  \draw[flow] (files.east)
+    -- node[interface,above=2.3mm] {traj pack /\\traj watch} (trajfs.west);
+
+  \draw[flow] ($(trajfs.north east)+(-2mm,0)$)
+    .. controls +(9mm,15mm) and +(-21mm,0) .. (analysis.west);
+  \node[interface,anchor=south]
+    at ($(analysis.west)+(-22.5mm,2.3mm)$) {traj sql / traj grep /\\traj find};
+  \draw[flow] (trajfs.east)
+    -- node[interface,above=2.3mm] {traj commit} (git.west);
+  \draw[flow] ($(trajfs.south east)+(-2mm,0)$)
+    .. controls +(9mm,-15mm) and +(-21mm,0) .. (humans.west);
+  \node[interface,anchor=north]
+    at ($(humans.west)+(-22.5mm,-2.3mm)$) {traj ls / traj cat /\\traj mount};
+\end{tikzpicture}
+\end{document}
