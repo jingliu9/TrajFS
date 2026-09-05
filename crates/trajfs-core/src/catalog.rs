@@ -1,9 +1,9 @@
 //! Parquet catalog: `files`, `dirs`, `excluded` and the pack `index` (docs/PLAN.md §3.1–§3.3).
-//! Segments are sorted by path so readers can prune row groups with the column statistics.
+//! Physical segments are size-bounded; file and directory rows remain sorted so readers can prune row groups.
 
 use crate::pack::{IndexRow, Loc};
 use crate::{FileRow, Kind, Sha, ROW_GROUP};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use arrow::array::{
     Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, Int64Builder, MapBuilder,
     StringBuilder, UInt16Builder, UInt32Builder, UInt8Builder,
@@ -18,7 +18,7 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::statistics::Statistics;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn arrow_writer(path: &Path, schema: Arc<Schema>) -> Result<ArrowWriter<File>> {
@@ -29,6 +29,150 @@ pub fn arrow_writer(path: &Path, schema: Arc<Schema>) -> Result<ArrowWriter<File
         .build();
     let f = File::create(path).with_context(|| format!("create {}", path.display()))?;
     Ok(ArrowWriter::try_new(f, schema, Some(props))?)
+}
+
+fn numbered_segment_path(dir: &Path, stem: &str, part: usize) -> PathBuf {
+    dir.join(format!("{stem}-{part:04}.parquet"))
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+fn write_segment_attempt<T>(
+    dir: &Path,
+    stem: &str,
+    rows: &[T],
+    max_bytes: u64,
+    next_part: &mut usize,
+    out: &mut Vec<PathBuf>,
+    write_one: &impl Fn(&Path, &[T]) -> Result<()>,
+) -> Result<()> {
+    let final_path = numbered_segment_path(dir, stem, *next_part);
+    let tmp = temp_path(&final_path);
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(error) = write_one(&tmp, rows) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    let size = std::fs::metadata(&tmp)?.len();
+    if size <= max_bytes {
+        std::fs::rename(&tmp, &final_path)?;
+        out.push(final_path);
+        *next_part += 1;
+        return Ok(());
+    }
+    std::fs::remove_file(&tmp)?;
+    if rows.len() <= 1 {
+        bail!(
+            "{stem} contains a single row whose Parquet encoding is {size} bytes (limit {max_bytes})"
+        );
+    }
+
+    // Use the observed compressed size to avoid repeatedly bisecting very large
+    // inputs. Any uneven partitions are checked again recursively.
+    let desired = (max_bytes.saturating_mul(9) / 10).max(1);
+    let pieces = usize::try_from(size.div_ceil(desired))
+        .unwrap_or(usize::MAX)
+        .max(2)
+        .min(rows.len());
+    let mut start = 0;
+    for i in 0..pieces {
+        let remaining_rows = rows.len() - start;
+        let remaining_pieces = pieces - i;
+        let take = remaining_rows.div_ceil(remaining_pieces);
+        let end = start + take;
+        write_segment_attempt(
+            dir,
+            stem,
+            &rows[start..end],
+            max_bytes,
+            next_part,
+            out,
+            write_one,
+        )?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// Write numbered Parquet segments, checking their final on-disk size. A row
+/// group-sized probe estimates the initial partition count for large inputs;
+/// exact size checks and recursive splitting are authoritative.
+pub(crate) fn write_sized_segments<T>(
+    dir: &Path,
+    stem: &str,
+    rows: &[T],
+    max_bytes: u64,
+    first_part: usize,
+    write_one: impl Fn(&Path, &[T]) -> Result<()>,
+) -> Result<Vec<PathBuf>> {
+    if max_bytes == 0 {
+        bail!("Parquet segment size limit must be greater than zero");
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut next_part = first_part;
+    let mut out = Vec::new();
+    if rows.is_empty() {
+        write_segment_attempt(
+            dir,
+            stem,
+            rows,
+            max_bytes,
+            &mut next_part,
+            &mut out,
+            &write_one,
+        )?;
+        return Ok(out);
+    }
+
+    let pieces = if rows.len() <= ROW_GROUP {
+        1
+    } else {
+        let probe_path = temp_path(&dir.join(format!("{stem}-probe.parquet")));
+        let _ = std::fs::remove_file(&probe_path);
+        if let Err(error) = write_one(&probe_path, &rows[..ROW_GROUP]) {
+            let _ = std::fs::remove_file(&probe_path);
+            return Err(error);
+        }
+        let probe_bytes = std::fs::metadata(&probe_path)?.len();
+        std::fs::remove_file(&probe_path)?;
+        let estimated = (probe_bytes as u128 * rows.len() as u128).div_ceil(ROW_GROUP as u128);
+        let desired = (max_bytes.saturating_mul(4) / 5).max(1) as u128;
+        usize::try_from(estimated.div_ceil(desired))
+            .unwrap_or(usize::MAX)
+            .max(1)
+            .min(rows.len())
+    };
+    let mut start = 0;
+    for i in 0..pieces {
+        let remaining_rows = rows.len() - start;
+        let remaining_pieces = pieces - i;
+        let take = remaining_rows.div_ceil(remaining_pieces);
+        let end = start + take;
+        write_segment_attempt(
+            dir,
+            stem,
+            &rows[start..end],
+            max_bytes,
+            &mut next_part,
+            &mut out,
+            &write_one,
+        )?;
+        start = end;
+    }
+    Ok(out)
+}
+
+pub(crate) fn rename_single_segment(paths: &mut [PathBuf], dir: &Path, stem: &str) -> Result<()> {
+    if paths.len() == 1 {
+        let legacy = dir.join(format!("{stem}.parquet"));
+        std::fs::rename(&paths[0], &legacy)?;
+        paths[0] = legacy;
+    }
+    Ok(())
 }
 
 /// Writes a batch (or several) to a file; the writer is created from the first batch's schema.
@@ -154,6 +298,15 @@ impl FilesWriter {
         let empty = self.batch()?;
         self.out.finish(|| Ok(empty))
     }
+}
+
+pub fn write_files(path: &Path, rows: &[FileRow]) -> Result<()> {
+    let mut writer = FilesWriter::create(path);
+    for row in rows {
+        writer.push(row)?;
+    }
+    writer.finish()?;
+    Ok(())
 }
 
 /// Row-group pruning helper: indices of row groups whose `path` statistics intersect `[lo, hi)`.
@@ -575,6 +728,112 @@ pub fn write_index(path: &Path, rows: &[IndexRow]) -> Result<()> {
     Ok(())
 }
 
+fn pad_empty_segments<T>(
+    paths: &mut Vec<PathBuf>,
+    count: usize,
+    dir: &Path,
+    stem: &str,
+    max_bytes: u64,
+    write_one: impl Fn(&Path, &[T]) -> Result<()>,
+) -> Result<()> {
+    while paths.len() < count {
+        let mut next_part = paths.len() + 1;
+        write_segment_attempt(dir, stem, &[], max_bytes, &mut next_part, paths, &write_one)?;
+    }
+    Ok(())
+}
+
+/// Write the four batch-scoped Parquet tables as synchronized physical
+/// segments. Every `files` segment has a matching `dirs`, `excluded`, and
+/// `index` segment, preserving the manifest and hook contract used by V1
+/// stores. Tables that need fewer physical pieces are padded with empty,
+/// schema-correct Parquet files.
+pub fn write_batch_segments(
+    store: &Path,
+    batch: u32,
+    files: &[FileRow],
+    dirs: &[DirRow],
+    excluded: &[crate::walk::Excluded],
+    index: &[IndexRow],
+    max_bytes: u64,
+) -> Result<Vec<String>> {
+    let catalog_dir = store.join("catalog");
+    let packs_dir = store.join("packs");
+    let files_stem = format!("files-{batch:04}");
+    let dirs_stem = format!("dirs-{batch:04}");
+    let excluded_stem = format!("excluded-{batch:04}");
+    let index_stem = format!("index-{batch:04}");
+
+    let mut files_paths =
+        write_sized_segments(&catalog_dir, &files_stem, files, max_bytes, 1, write_files)?;
+    let mut dirs_paths =
+        write_sized_segments(&catalog_dir, &dirs_stem, dirs, max_bytes, 1, write_dirs)?;
+    let mut excluded_paths = write_sized_segments(
+        &catalog_dir,
+        &excluded_stem,
+        excluded,
+        max_bytes,
+        1,
+        |path, rows| write_excluded(path, rows, batch),
+    )?;
+    let mut index_paths =
+        write_sized_segments(&packs_dir, &index_stem, index, max_bytes, 1, write_index)?;
+
+    let count = [
+        files_paths.len(),
+        dirs_paths.len(),
+        excluded_paths.len(),
+        index_paths.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(1);
+    pad_empty_segments(
+        &mut files_paths,
+        count,
+        &catalog_dir,
+        &files_stem,
+        max_bytes,
+        write_files,
+    )?;
+    pad_empty_segments(
+        &mut dirs_paths,
+        count,
+        &catalog_dir,
+        &dirs_stem,
+        max_bytes,
+        write_dirs,
+    )?;
+    pad_empty_segments(
+        &mut excluded_paths,
+        count,
+        &catalog_dir,
+        &excluded_stem,
+        max_bytes,
+        |path, rows| write_excluded(path, rows, batch),
+    )?;
+    pad_empty_segments(
+        &mut index_paths,
+        count,
+        &packs_dir,
+        &index_stem,
+        max_bytes,
+        write_index,
+    )?;
+
+    if count == 1 {
+        rename_single_segment(&mut files_paths, &catalog_dir, &files_stem)?;
+        rename_single_segment(&mut dirs_paths, &catalog_dir, &dirs_stem)?;
+        rename_single_segment(&mut excluded_paths, &catalog_dir, &excluded_stem)?;
+        rename_single_segment(&mut index_paths, &packs_dir, &index_stem)?;
+        Ok(vec![files_stem])
+    } else {
+        Ok((1..=count)
+            .map(|part| format!("{files_stem}-{part:04}"))
+            .collect())
+    }
+}
+
 pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
@@ -616,4 +875,94 @@ pub fn row_count(path: &Path) -> Result<i64> {
     let file = File::open(path)?;
     let b = ParquetRecordBatchReaderBuilder::try_new(file)?;
     Ok(b.metadata().file_metadata().num_rows())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pack::IndexRow;
+
+    #[test]
+    fn batch_tables_split_into_synchronized_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog_dir = tmp.path().join("catalog");
+        let packs_dir = tmp.path().join("packs");
+        let files: Vec<FileRow> = (0..400u32)
+            .map(|i| FileRow {
+                path: format!(
+                    "rounds/round-{i:04}/builder/long-component-{i:08x}/result-{i:04}.json"
+                ),
+                kind: Kind::File,
+                mode: 0o644,
+                size: i as i64 + 1,
+                sha: [i as u8; 32],
+                mtime_ns: i as i64,
+                batch: 7,
+                attrs: vec![("round".into(), i.to_string())],
+            })
+            .collect();
+        let dirs = dirs_from_files(files.iter(), 7);
+        let excluded: Vec<crate::walk::Excluded> = (0..120u32)
+            .map(|i| crate::walk::Excluded {
+                rel: format!("cache/{i:04}/long-excluded-name-{i:08x}.bin"),
+                size: i as u64,
+                rule: "test-rule",
+            })
+            .collect();
+        let index: Vec<IndexRow> = files
+            .iter()
+            .enumerate()
+            .map(|(i, row)| IndexRow {
+                sha: row.sha,
+                loc: Loc {
+                    pack: 1,
+                    chunk_offset: i as i64 * 100,
+                    chunk_len: 100,
+                    offset: 0,
+                    size: row.size,
+                    part: 0,
+                },
+            })
+            .collect();
+        let max_bytes = 8 << 10;
+        let segments =
+            write_batch_segments(tmp.path(), 7, &files, &dirs, &excluded, &index, max_bytes)
+                .unwrap();
+        assert!(segments.len() > 1, "{segments:?}");
+
+        for segment in &segments {
+            let suffix = segment.strip_prefix("files-").unwrap();
+            for path in [
+                catalog_dir.join(format!("{segment}.parquet")),
+                catalog_dir.join(format!("dirs-{suffix}.parquet")),
+                catalog_dir.join(format!("excluded-{suffix}.parquet")),
+                packs_dir.join(format!("index-{suffix}.parquet")),
+            ] {
+                assert!(path.is_file(), "{}", path.display());
+                assert!(
+                    path.metadata().unwrap().len() <= max_bytes,
+                    "{} is too large",
+                    path.display()
+                );
+            }
+        }
+
+        let rows = |dir: &Path, prefix: &str| -> i64 {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                })
+                .map(|path| row_count(&path).unwrap())
+                .sum()
+        };
+        assert_eq!(rows(&catalog_dir, "files-"), files.len() as i64);
+        assert_eq!(rows(&catalog_dir, "dirs-"), dirs.len() as i64);
+        assert_eq!(rows(&catalog_dir, "excluded-"), excluded.len() as i64);
+        assert_eq!(rows(&packs_dir, "index-"), index.len() as i64);
+    }
 }

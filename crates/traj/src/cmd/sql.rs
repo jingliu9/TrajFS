@@ -19,45 +19,61 @@ pub struct SqlArgs {
 pub struct StoreTables {
     pub name: String,
     pub root: std::path::PathBuf,
-    pub adapter: String,
+    pub files: Vec<std::path::PathBuf>,
+    pub dirs: Vec<std::path::PathBuf>,
+    pub excluded: Vec<std::path::PathBuf>,
+    pub indexes: Vec<std::path::PathBuf>,
+    pub events: Vec<std::path::PathBuf>,
+    _store: trajfs_core::Store,
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn add_view(
+    out: &mut Vec<(String, String)>,
+    stores: &[StoreTables],
+    table: &str,
+    paths: impl Fn(&StoreTables) -> &[std::path::PathBuf],
+) {
+    let parts: Vec<String> = stores
+        .iter()
+        .filter_map(|store| {
+            let files = paths(store);
+            if files.is_empty() {
+                return None;
+            }
+            let files = files
+                .iter()
+                .map(|path| sql_string(&path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "select {} as store, * from read_parquet([{}], union_by_name=true)",
+                sql_string(&store.name),
+                files
+            ))
+        })
+        .collect();
+    if !parts.is_empty() {
+        out.push((
+            table.to_string(),
+            format!(
+                "create view {table} as {}",
+                parts.join(" union all by name ")
+            ),
+        ));
+    }
 }
 
 pub fn view_sql(stores: &[StoreTables]) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let tables = [
-        ("files", "catalog/files-*.parquet"),
-        ("dirs", "catalog/dirs-*.parquet"),
-        ("excluded", "catalog/excluded-*.parquet"),
-        ("blobs", "packs/index-*.parquet"),
-    ];
-    for (t, glob) in tables {
-        let parts: Vec<String> = stores
-            .iter()
-            .map(|s| {
-                format!(
-                    "select '{}' as store, * from read_parquet('{}/{}', union_by_name=true)",
-                    s.name.replace('\'', "''"),
-                    s.root.display(),
-                    glob
-                )
-            })
-            .collect();
-        out.push((
-            t.to_string(),
-            format!("create view {t} as {}", parts.join(" union all by name ")),
-        ));
-    }
-    let ev: Vec<String> = stores
-        .iter()
-        .filter(|s| s.root.join("derived").join(&s.adapter).is_dir())
-        .map(|s| format!("select '{}' as store, * from read_parquet('{}/derived/{}/events-*.parquet', union_by_name=true)", s.name.replace('\'', "''"), s.root.display(), s.adapter))
-        .collect();
-    if !ev.is_empty() {
-        out.push((
-            "events".into(),
-            format!("create view events as {}", ev.join(" union all by name ")),
-        ));
-    }
+    add_view(&mut out, stores, "files", |store| &store.files);
+    add_view(&mut out, stores, "dirs", |store| &store.dirs);
+    add_view(&mut out, stores, "excluded", |store| &store.excluded);
+    add_view(&mut out, stores, "blobs", |store| &store.indexes);
+    add_view(&mut out, stores, "events", |store| &store.events);
     out
 }
 
@@ -69,11 +85,29 @@ pub fn tables_for(stores: &[String]) -> Result<Vec<StoreTables>> {
     let mut v = Vec::new();
     for s in stores {
         let root = resolve_store(s, cfg.as_ref())?.canonicalize()?;
-        let m = trajfs_core::Manifest::load(&root)?;
+        let store = trajfs_core::Store::open(&root)?;
+        let files = store.files_segments().to_vec();
+        let dirs = store.dirs_segments().to_vec();
+        let excluded = store.excluded_segments().to_vec();
+        let indexes = store.index_segments().to_vec();
+        let events = store
+            .derived_segments()
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("events-"))
+            })
+            .cloned()
+            .collect();
         v.push(StoreTables {
-            name: m.store_id.clone(),
-            root,
-            adapter: m.adapter.name.clone(),
+            name: store.manifest.store_id.clone(),
+            root: root.clone(),
+            files,
+            dirs,
+            excluded,
+            indexes,
+            events,
+            _store: store,
         });
     }
     Ok(v)

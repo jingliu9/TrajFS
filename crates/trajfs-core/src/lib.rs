@@ -1,8 +1,9 @@
 //! trajfs-core: content-addressed store for agent run trees.
 //!
 //! Layout of a store (see docs/PLAN.md §3):
-//! `MANIFEST.json`, `catalog/files-B.parquet`, `catalog/dirs-B.parquet`, `catalog/excluded-B.parquet`,
-//! `packs/NNNN.pack`, `packs/index-B.parquet`, `derived/<adapter>/<table>-B.parquet`.
+//! `MANIFEST.json`, `catalog/{files,dirs,excluded}-B[-P].parquet`,
+//! `packs/NNNN.pack`, `packs/index-B[-P].parquet`,
+//! `derived/<adapter>/<table>-B[-P].parquet`.
 
 pub mod adapter;
 pub mod catalog;
@@ -80,9 +81,11 @@ pub fn basename_of(path: &str) -> &str {
 
 /// Maximum uncompressed bytes per zstd frame (a "chunk").
 pub const CHUNK_BYTES: usize = 1 << 20;
-/// A pack is sealed once its compressed size reaches this.
-pub const PACK_SEAL_BYTES: u64 = 64 << 20;
+/// Conservative maximum for generated packs and Parquet segments.
+pub const ARTIFACT_TARGET_BYTES: u64 = 60 << 20;
+/// Default maximum pack size.
+pub const PACK_SEAL_BYTES: u64 = ARTIFACT_TARGET_BYTES;
 /// Row group size for catalog Parquet files.
 pub const ROW_GROUP: usize = 16_384;
 /// Store format version written to MANIFEST.json.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;

@@ -44,7 +44,7 @@ kept).
 | analytics engine | DuckDB, embedded, stateless | the Parquet files are the artifact; DuckDB is only compute |
 | runner-specific knowledge | **adapters** (§3.6): path attributes, trajectory detection, event parsing, rule profiles, ingestion triggers | keeps the core generic; adding a new agent format never changes the store format |
 | raw bytes are always kept | trajectories are stored as blobs *and* optionally parsed into derived tables | derived tables are rebuildable when an adapter changes; raw is the truth |
-| shard size | packs and catalog segments sealed at ≤ 64 MiB | GitHub rejects > 100 MB, warns > 50 MB |
+| shard size | packs, Parquet segments, and serialized manifests capped at ≤ 60 MiB (or a lower configured hook limit) | stays safely below the 65 MiB hook and GitHub's 100 MB hard limit |
 | mutability | append-only batches listed in `MANIFEST.json` | additive commits; a batch is the unit of retry |
 | implementation | **Rust for everything**: store, catalog, adapters, CLI, hook logic, watcher, skill export, benchmarks, tests. No Python in the build or test path; the Review 1 Python scripts are historical artifacts under `review-bench/` | one static binary for any host; one toolchain; the owner's directive |
 | Rust deps | `parquet`+`arrow`, `zstd`, `sha2`, `rayon`, `clap`, `serde_json`, `duckdb` (bundled) | |
@@ -85,19 +85,24 @@ only behind `sql`; that split changes no format.
 <name>.trajstore/
   MANIFEST.json                     format version, store id, source, adapter (name, version), batches[]
   catalog/
-    files-0001.parquet              one segment per ingestion batch, sorted by path
-    dirs-0001.parquet               derived per batch: dir, parent, name, counts, bytes
-    excluded-0001.parquet           paths the rule profile left out (path, size, rule)
+    files-0001[-0001].parquet       one or more physical segments per batch, sorted by path
+    dirs-0001[-0001].parquet        derived per batch: dir, parent, name, counts, bytes
+    excluded-0001[-0001].parquet    paths the rule profile left out (path, size, rule)
   packs/
-    0001.pack ...                   opaque: magic + zstd frames, ≤ 64 MiB each
-    index-0001.parquet              sha → (pack, chunk_offset, chunk_len, offset, size)
+    0001.pack ...                   opaque: magic + zstd frames, ≤ 60 MiB each
+    index-0001[-0001].parquet       sha → (pack, chunk_offset, chunk_len, offset, size)
   derived/
-    <adapter>/<table>-0001.parquet  adapter-produced tables (e.g. events), rebuildable from packs
+    <adapter>/<table>-0001[-0001].parquet  adapter-produced tables, rebuildable from packs
+    <adapter>/events-rebuild-0001[-0001].parquet  manifest-published full rebuild generation
   .gitattributes                    *.pack -diff -delta binary ; *.parquet -diff binary
 ```
 
-A store is read as a whole with globs (`catalog/files-*.parquet`). Segments are never rewritten; `traj compact` (V1.1)
-merges segments into a new batch that supersedes the old ones and deletes them only as part of that explicit command.
+`MANIFEST.json` is the publication boundary. Readers and DuckDB register only its declared files; missing artifacts
+make the store invalid, while finalized but unlisted files from an interrupted writer remain invisible until orphan
+cleanup. A table that fits in one physical file keeps the legacy `-BBBB.parquet` name. Larger tables use
+`-BBBB-PPPP.parquet`; the four batch tables use synchronized part suffixes (with empty schema-correct companions where
+necessary), and `batches[].segments` lists the `files-*` stems. Segment ordering parses numeric batch/part ids rather
+than relying on lexical filename order.
 
 ### 3.1 `files` (Parquet, zstd, row groups of 65,536, sorted bytewise by `path`)
 
@@ -147,7 +152,7 @@ it beats plain chunks by ≥ 20 %.
 ### 3.4 `MANIFEST.json`
 
 ```json
-{"format": 1, "store_id": "...", "source": "/workspace/farm/onesw-gen-outputs/.../onesw-generation-...",
+{"format": 2, "store_id": "...", "source": "/workspace/farm/onesw-gen-outputs/.../onesw-generation-...",
  "adapter": {"name": "onesw", "version": 1}, "rules": {"name": "onesw-archive", "version": 3},
  "batches": [{"id": 1, "created": "2026-09-04T07:12:00Z", "label": "rounds 1-38", "paths": 2173722,
               "bytes": 12928153598, "new_blobs": 23864, "new_blob_bytes": 3053283334,
@@ -155,13 +160,23 @@ it beats plain chunks by ≥ 20 %.
               "source_tree_sha256": "...", "errors": []}]}
 ```
 
-`adapter` may be `{"name": "none"}`; every verb in §5 works without one.
+Format 2 makes every derived artifact manifest-authoritative. Readers remain compatible with format-1 stores,
+including the legacy `derived/<adapter>/events-0000.parquet` full-rebuild convention. `adapter` may be
+`{"name": "none"}`; every verb in §5 works without one.
 
 ### 3.5 Derived tables: the generic `events` envelope
 
-Any adapter that recognises trajectory files emits `derived/<adapter>/events-B.parquet` with this envelope. The
+Any adapter that recognises trajectory files emits `derived/<adapter>/events-B[-P].parquet` with this envelope. The
 envelope is deliberately thin (Review 1 §3: stable envelope, flexible payload); agent-specific fields stay in
 `payload_json` and are promoted to columns only inside the adapter's own extra tables.
+
+`traj derive` rebuilds events as a uniquely named generation while the old manifest-listed generation remains active.
+After every new segment is closed and size-checked, one atomic manifest replacement publishes the generation; old
+files are removed afterward. Readers hold a shared store lock for their lifetime, while pack/derive retain the
+exclusive lock through cleanup, so an already-open reader cannot lose its generation. Interrupted generations are
+therefore invisible and later cleaned as orphans. Readers open an existing `.lock` read-only. For a legacy store
+without `.lock`, they lock `MANIFEST.json` shared; writers lock that manifest exclusively before creating `.lock`,
+which preserves coordination without requiring readers to mutate a read-only store.
 
 | column | type | meaning |
 |---|---|---|
@@ -211,6 +226,9 @@ markers = ["rounds/round-*/DONE"]
 raw_patterns = ['(^|/)rounds/round-\d+/']
 ```
 
+Adapter `name` is also a path-safety boundary: it must be exactly one non-empty normal path component. Absolute names,
+slashes, `.` and `..` are rejected before creating or resolving derived paths.
+
 `traj init` takes `--adapter <path|builtin>`, or `--scaffold-adapter` to write `trajfs/adapter.toml` and
 `trajfs/rules.toml` templates; when neither is given on a terminal it asks whether to scaffold, and the exported
 skill tells the repo's agent how to complete the file. The onesw adapter therefore lives at
@@ -230,11 +248,14 @@ hook patterns.
    different → re-hashed; if the sha changed the path is recorded again (newest segment wins on read; `verify` reports
    shadowing).
 3. **Hash** every candidate (sha256, `--jobs` workers; 22 s for 2.17 M files warm in the prototype).
-4. **Pack** blobs whose sha is not in any existing index, sorted by `(dir, name)` for chunk locality; frames cut at
-   1 MiB uncompressed, packs sealed at 64 MiB compressed; written as `NNNN.pack.tmp`, renamed when sealed.
-5. **Write** `catalog/files-B`, `dirs-B`, `excluded-B`, `packs/index-B`, then adapter-derived tables, then append the
-   batch to `MANIFEST.json` (temp file + rename). Nothing outside the batch is touched; a crash before the manifest
-   update leaves orphans that the next `pack` deletes after confirming they are unreferenced.
+4. **Pack** blobs whose sha is not in any existing index, sorted by `(dir, name)` for chunk locality; frames are at
+   most 1 MiB uncompressed, and packs are sealed before the next frame would exceed the artifact target; each is
+   written as `NNNN.pack.tmp` and renamed when sealed.
+5. **Write** size-bounded `catalog/files-B[-P]`, `dirs-B[-P]`, `excluded-B[-P]`, `packs/index-B[-P]`, then
+   size-bounded adapter-derived tables, then append the
+   batch to `MANIFEST.json`. The serialized manifest is size-checked, written through a unique create-new/no-follow
+   same-directory temporary handle, flushed and synced, then atomically renamed. Until that rename, readers and SQL
+   ignore every new artifact; a crash leaves unreferenced orphans that the next `pack` safely removes.
 6. Summary line; non-zero exit if any path was unreadable (batch is still written; failures listed in the manifest).
 
 `<store>/.lock` (flock) is held for the duration of a pack; readers never lock.
@@ -250,7 +271,7 @@ automatically.
 A rule profile is TOML: `exclude_dirs`, `exclude_ext`, `exclude_under = [{dirs, ext, max_bytes}]`, `max_bytes`,
 `always_keep` globs, `elf_min_bytes`. Profiles ship in the crate (`rules/onesw-archive.toml` ports `archfilter.py`;
 `rules/none.toml` keeps everything; `rules/no-build-products.toml` is the generic default). The profile name and
-version go to the manifest, the excluded list to `catalog/excluded-B.parquet`.
+version go to the manifest, the excluded list to `catalog/excluded-B[-P].parquet`.
 
 ## 5. Read path: the CLI
 
@@ -277,7 +298,7 @@ index load; `extract` of a 100 K-file subtree ≤ 30 s; `grep` over all distinct
 
 ## 6. Git integration
 
-- The store is committed as ordinary files; ≤ 64 MiB shards, no LFS. `.gitattributes` marks packs and Parquet binary
+- The store is committed as ordinary files; ≤ 60 MiB shards by default, no LFS. `.gitattributes` marks packs and Parquet binary
   and `-delta`.
 - A batch is a commit touching only its new files, so `add`/`commit`/`push` cost is proportional to the batch.
 - A clone is directly readable by `traj`; nothing is extracted to browse.
@@ -316,8 +337,10 @@ rules      = "onesw-archive"
    warns (and with `--strict` refuses) when the source is inside a git work tree.
 3. **Repo side.** `traj init` installs the pre-commit hook (a symlink to the `traj` binary, §2.1) and a `.gitattributes`. The hook rejects a commit that adds
    more than 10,000 paths, any path matching a raw-run pattern (`rounds/round-*/`, `*/call*/events.jsonl`, `selected/`),
-   or any file > 64 MiB, and prints the `traj pack` command to run instead. Hooks are local, so the same rule is also
-   checked on push where possible (`traj hook check-tree <rev>` run by CI, no script).
+   any file over the configured 65 MiB default, any symlink/gitlink-backed store artifact, or a store whose staged
+   artifact inventory differs in either direction from its manifest. Policy, sizes, and manifests are parsed from the
+   staged Git objects, not through working-tree paths. Hooks are local, so committed trees receive the same inventory and mode checks through
+   `traj hook check-tree <rev>` in CI.
 4. **Commit side.** `traj commit [--push] <store>` is the intended path: it packs if needed, stages only the new batch
    files under `store_root`, commits with a generated message (store id, batch label, paths, new bytes) and pushes.
    People and agents are told to use it; the hook makes the raw path fail loudly if they do not.
@@ -394,7 +417,7 @@ expected counts are recorded on first run under `crates/traj/tests/expected/` an
 - `generic` dataset: a synthetic tree of plain logs plus JSONL with heterogeneous keys, no adapter.
 
 **T1 Pack format (unit).** Frame cut at exactly 1 MiB; 0-byte blob (kind 2, no index row); 1 MiB, 1 MiB + 1 and
-100 MiB blobs (multi-part); pack sealing at 64 MiB; magic and frame boundaries validated by the `zstd` CLI; every index
+100 MiB blobs (multi-part); packs remain below the 60 MiB target; magic and frame boundaries validated by the `zstd` CLI; every index
 row points inside its pack.
 
 **T2 Round trip (property-based).** Random trees (proptest): depth ≤ 8, unicode/space/dot names, kinds file/symlink/
@@ -404,8 +427,9 @@ contents. `pack → extract` is byte-identical (`diff -r --no-dereference`), mod
 not change bytes).
 
 **T3 Integrity.** Flip one byte in a pack → `verify --deep` names the frame and every affected path; `cat` of an
-affected path fails unless `--no-verify`. Truncated pack → `verify` fails, other packs readable. Missing index segment
-→ catalog shas without location reported. Missing `MANIFEST.json` → every verb refuses clearly.
+affected path fails unless `--no-verify`. Truncated pack → `verify` fails, other packs readable. Missing
+manifest-declared catalog, index, pack, or derived artifacts → quick and deep verification refuse the store. Missing
+`MANIFEST.json` → every verb refuses clearly.
 
 **T4 Catalog semantics.** On the synthetic and generic fixtures, `ls`, `tree`, `find`, `du`, `stat` equal the same
 operations on the extracted tree (`ls -A`, `find`, `du -b --apparent-size`), including empty directories (present only
@@ -436,7 +460,7 @@ absent from batch 1; manifest lists two batches; a path modified between batches
 newest; SIGKILL during pack leaves the store readable and `verify` clean; the next `pack` removes orphans and completes
 the batch. `traj watch` on a copy of a lane packs when a `selected-storage.json` is added.
 
-**T9 Git.** Commit a store to a scratch repo: every file ≤ 64 MiB; adding batch 2 stages only batch-2 files; packs are
+**T9 Git.** Commit a store to a scratch repo: every file ≤ 60 MiB by default; adding batch 2 stages only batch-2 files; packs are
 binary per `.gitattributes`; a clone passes T4/T5 unchanged. Push the four stores to a side branch and record push and
 clone times next to the raw-tree commits on `explore/onesw-storage-dedupe`.
 

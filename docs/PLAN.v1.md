@@ -37,7 +37,7 @@ an input, §4.2).
 | catalog container | Parquet (`files`, `dirs`, `blobs` index), read by DuckDB | 2.2 M-row `ls`/`find` in ≈ 10 ms; standard, portable |
 | analytics engine | DuckDB, embedded, no state of its own | the Parquet files are the persistent artifact; DuckDB is only compute |
 | trajectories | stored as blobs **and** parsed into `events/*.parquet` (derived, rebuildable) | 72 % of distinct bytes are `events.jsonl`; they are row-structured |
-| shard size | packs and catalog segments sealed at ≤ 64 MiB | GitHub rejects > 100 MB, warns > 50 MB |
+| shard size | packs and Parquet segments capped at ≤ 60 MiB (or a lower configured hook limit) | GitHub rejects > 100 MB, warns > 50 MB |
 | mutability | append-only; ingestion batches; a `MANIFEST.json` lists batches | additive commits; a batch is the unit of retry |
 | implementation language | Rust crate `trajfs`, binary `traj` (repo already has a Cargo `.gitignore`; onesw-gen is Rust) | one static binary for both hosts; Python scripts from Review 1 stay as the cross-implementation oracle in tests |
 | Rust deps | `parquet` + `arrow` (write/read catalog), `zstd`, `sha2`, `rayon`, `clap`, `duckdb` (bundled) for `sql`/`ls`/`find` | |
@@ -48,19 +48,19 @@ an input, §4.2).
 <run>.trajstore/
   MANIFEST.json                     format version, run id, source path, rules version, batches[]
   catalog/
-    files-0001.parquet              one segment per ingestion batch (sorted by path)
-    dirs-0001.parquet               derived per batch: dir, parent, name, n_files, n_dirs, bytes
+    files-0001[-0001].parquet       one or more physical segments per ingestion batch (sorted by path)
+    dirs-0001[-0001].parquet        derived per batch: dir, parent, name, n_files, n_dirs, bytes
   packs/
-    0001.pack  0002.pack ...        opaque: magic + zstd frames (chunks), ≤ 64 MiB each
-    index-0001.parquet              sha → (pack, chunk_offset, chunk_len, offset_in_chunk, size), one per batch
+    0001.pack  0002.pack ...        opaque: magic + zstd frames (chunks), ≤ 60 MiB each
+    index-0001[-0001].parquet       sha → (pack, chunk_offset, chunk_len, offset_in_chunk, size)
   events/
-    events-0001.parquet             derived from every events.jsonl in the batch (optional, `traj index-events`)
+    events-0001[-0001].parquet      derived from every events.jsonl in the batch (optional, `traj index-events`)
   .gitattributes                    *.pack -diff -delta binary ; *.parquet -diff binary
 ```
 
-A store is read as a whole with globs (`catalog/files-*.parquet`); segments are never rewritten. `traj compact`
-(V1.1) may merge segments into one, producing a new batch that supersedes the old ones (old files deleted only by that
-explicit command).
+`MANIFEST.json` is the publication boundary: readers and SQL use only declared artifacts, reject missing declarations,
+and ignore unlisted output from interrupted writers until orphan cleanup. Physical parts are ordered by parsed numeric
+batch and part ids, not lexically. Segments are otherwise immutable.
 
 ### 3.1 `files` schema (Parquet, zstd, row groups of 65,536, sorted by `path` bytewise)
 
@@ -151,9 +151,10 @@ Promotion rules live in one small module; changing them means re-running `traj i
    changed, recorded again in the new segment (the newest segment wins on read; `traj verify` reports the shadowing).
 3. **Hash** every candidate (sha256, 16 workers: 22 s for 2.17 M files / 12.9 GB warm).
 4. **Pack** the blobs whose sha is not in any existing index: sorted by `(dir, name)` so neighbours share a chunk;
-   chunk cut at 1 MiB uncompressed; pack sealed at 64 MiB compressed; each pack written to `NNNN.pack.tmp` and renamed
+   chunk cut at 1 MiB uncompressed; pack capped at 60 MiB compressed; each pack written to `NNNN.pack.tmp` and renamed
    when sealed.
-5. **Write** `catalog/files-B.parquet`, `catalog/dirs-B.parquet`, `packs/index-B.parquet`, then append the batch to
+5. **Write** `catalog/files-B[-P].parquet`, `catalog/dirs-B[-P].parquet`,
+   `packs/index-B[-P].parquet`, then append the batch to
    `MANIFEST.json` (written to a temp file and renamed). Nothing outside the new batch is touched; a crash before the
    manifest update leaves orphan files that the next `traj pack` removes after checking they are unreferenced.
 6. Print a summary (paths, bytes, new blobs, new bytes, packs, elapsed) and exit non-zero if any file could not be read
@@ -172,7 +173,7 @@ Snapshots that the runner still writes (`selected/` as a copy) cost nothing but 
 The archive rules from `archfilter.py` (exclude `.cache`, `node_modules`, `target`, `build`, binaries, bulk measurement
 CSV/JSONL under `logs/`/`results/`/`experiments/`, files > 20 MB, ...) become a TOML rule set shipped in the crate
 (`rules/onesw-archive.toml`) and recorded by name+version in the manifest. `traj pack --rules none` stores
-everything. Excluded paths are written to `catalog/excluded-B.parquet` (path, size, rule) so the manifest of what was
+everything. Excluded paths are written to `catalog/excluded-B[-P].parquet` (path, size, rule) so the manifest of what was
 left out travels with the store, as `ARCHIVE-EXCLUDED.tsv` does today.
 
 ## 5. Read path: the CLI
@@ -200,7 +201,7 @@ run ≤ 10 s.
 
 ## 6. Git integration
 
-- The store directory is committed as ordinary files. With ≤ 64 MiB shards no LFS is needed. `.gitattributes` marks
+- The store directory is committed as ordinary files. With ≤ 60 MiB shards no LFS is needed. `.gitattributes` marks
   packs and Parquet as binary and `-delta` so git does not waste time trying to delta them.
 - A batch is a commit: `git add <store>/catalog/*-B.parquet <store>/packs/* <store>/MANIFEST.json`. Only new files are
   added, so `git add`, `commit` and `push` cost is proportional to the batch (tens of files), not to the run.
@@ -258,7 +259,7 @@ Test code lives in `tests/` (Rust integration tests) and `tests/oracle/` (Python
 `cargo test` runs T1–T7 on the synthetic fixture in < 60 s; `cargo test --features slow` adds the reference-run tests.
 
 **T1 Pack format, unit.** Chunk cutting at exactly 1 MiB; a 0-byte blob (kind = empty, no index row); a blob of
-exactly 1 MiB, 1 MiB + 1, and 100 MiB (multi-frame path); pack sealing at 64 MiB; magic and frame boundaries validated
+exactly 1 MiB, 1 MiB + 1, and 100 MiB (multi-frame path); pack sealing below 60 MiB; magic and frame boundaries validated
 by an independent zstd decoder; index rows point inside their pack.
 
 **T2 Round trip, property-based.** Random trees (proptest): depth ≤ 8, names with spaces/unicode/leading dots/`\n`
@@ -268,8 +269,8 @@ identical modes and symlink targets; `--hardlink-dedupe` output has `nlink > 1` 
 
 **T3 Integrity.** After packing: flip one byte in a pack → `verify --deep` names the chunk and every affected path;
 `cat` of an affected path fails with a sha mismatch unless `--no-verify`. Truncate a pack → `verify` fails, other packs
-still readable. Delete an index segment → `verify` reports catalog shas with no location. Delete `MANIFEST.json` →
-every verb refuses with a clear error.
+still readable. Delete a manifest-declared artifact → quick and deep verification refuse the store. Delete
+`MANIFEST.json` → every verb refuses with a clear error.
 
 **T4 Catalog semantics.** For the synthetic tree, `ls`, `tree`, `find`, `du`, `stat` output equals the output of the
 same operations on the extracted tree (golden comparison via `ls -A`, `find`, `du -b --apparent-size`), including
@@ -293,7 +294,7 @@ batch 1; `MANIFEST.json` lists two batches; a path modified between batches is r
 newest; killing `traj pack` (SIGKILL) mid-pack leaves the store readable and `verify` clean, and the next `pack`
 removes the orphan `.tmp` files and completes the batch.
 
-**T9 Git.** Commit a store to a scratch repo: every file ≤ 64 MiB; `git add` of batch 2 touches only batch-2 files;
+**T9 Git.** Commit a store to a scratch repo: every file ≤ 60 MiB by default; `git add` of batch 2 touches only batch-2 files;
 `.gitattributes` marks packs binary; clone the scratch repo and run T4/T5 against the clone unchanged. Push the four
 fourth-grid stores to a side branch and time push/clone against the raw-tree commits (`explore/onesw-storage-dedupe`).
 

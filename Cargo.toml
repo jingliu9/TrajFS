@@ -25,6 +25,7 @@ parquet = { version = "57", default-features = false, features = ["arrow", "zstd
 arrow = { version = "57", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
+libc = "0.2"
 tempfile = "3"
 proptest = "1"
 assert_cmd = "2"

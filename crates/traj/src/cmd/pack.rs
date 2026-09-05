@@ -1,8 +1,8 @@
-use crate::config::{check_separation, Config};
+use crate::config::{artifact_target_bytes, check_separation, Config};
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use std::path::{Path, PathBuf};
-use trajfs_core::ingest::{ingest, IngestOptions};
+use trajfs_core::ingest::{ingest_with_max_artifact_bytes, IngestOptions};
 use trajfs_core::rules::Rules;
 
 #[derive(Args, Debug)]
@@ -75,7 +75,7 @@ pub fn run(a: PackArgs) -> Result<i32> {
     let cfg = Config::find();
     let ad = trajfs_adapters::resolve(&adapter, cfg.as_ref().map(|c| c.dir.as_path()))?;
     let rules_obj = Rules::resolve_from(&rules, cfg.as_ref().map(|c| c.dir.as_path()))?;
-    let sum = ingest(
+    let sum = ingest_with_max_artifact_bytes(
         &a.src,
         &store,
         IngestOptions {
@@ -87,6 +87,7 @@ pub fn run(a: PackArgs) -> Result<i32> {
             derive: !a.no_derive,
             store_id: a.id.clone(),
         },
+        artifact_target_bytes(cfg.as_ref()),
     )
     .with_context(|| format!("pack {} into {}", a.src.display(), store.display()))?;
     let b = &sum.batch;

@@ -2,11 +2,13 @@
 
 use crate::catalog::{self, DirRow};
 use crate::hash::sha_of_bytes;
-use crate::manifest::Manifest;
+use crate::manifest::{resolve_store_artifact, Manifest};
 use crate::pack::{Loc, PackReader};
 use crate::{FileRow, Kind, Sha};
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -17,8 +19,12 @@ pub struct Store {
     pub manifest: Manifest,
     files_segments: Vec<PathBuf>,
     dirs_segments: Vec<PathBuf>,
+    excluded_segments: Vec<PathBuf>,
     index_segments: Vec<PathBuf>,
+    derived_segments: Vec<PathBuf>,
+    pack_ids: HashSet<u32>,
     index: OnceLock<HashMap<Sha, Vec<Loc>>>,
+    _lock: Option<File>,
 }
 
 /// Range `[dir/, dir0)` covering every path below `dir` (or everything for the root).
@@ -33,19 +39,96 @@ pub fn subtree_range(dir: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((lo, hi))
 }
 
-fn segments(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
-    let mut v = Vec::new();
-    if dir.is_dir() {
-        for e in std::fs::read_dir(dir)? {
-            let e = e?;
-            let n = e.file_name().to_string_lossy().to_string();
-            if n.starts_with(prefix) && n.ends_with(".parquet") {
-                v.push(e.path());
-            }
+fn open_regular_file(root: &Path, path: &Path) -> Result<File> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("open regular file {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(root) {
+        bail!(
+            "{} resolves outside store {}",
+            path.display(),
+            root.display()
+        );
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))
+}
+
+fn open_reader_lock(root: &Path) -> Result<File> {
+    let lock_path = root.join(".lock");
+    let file = match std::fs::symlink_metadata(&lock_path) {
+        Ok(_) => open_regular_file(root, &lock_path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let manifest = Manifest::path(root);
+            open_regular_file(root, &manifest)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    FileExt::try_lock_shared(&file)
+        .with_context(|| format!("store {} is being updated", root.display()))?;
+    Ok(file)
+}
+
+pub struct StoreWriteLock {
+    _legacy_manifest: Option<File>,
+    _lock: File,
+}
+
+pub fn lock_store_exclusive(root: &Path) -> Result<StoreWriteLock> {
+    let manifest_path = Manifest::path(root);
+    let legacy_manifest = match std::fs::symlink_metadata(&manifest_path) {
+        Ok(_) => {
+            let file = open_regular_file(root, &manifest_path)?;
+            FileExt::try_lock_exclusive(&file)
+                .with_context(|| format!("store {} is in use", root.display()))?;
+            Some(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let lock_path = root.join(".lock");
+    if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+        if !metadata.file_type().is_file() {
+            bail!("store lock {} is not a regular file", lock_path.display());
+        }
+        let resolved = lock_path.canonicalize()?;
+        if !resolved.starts_with(root) {
+            bail!(
+                "store lock {} resolves outside {}",
+                lock_path.display(),
+                root.display()
+            );
         }
     }
-    v.sort();
-    Ok(v)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let lock = options.open(&lock_path)?;
+    if !std::fs::symlink_metadata(&lock_path)?.file_type().is_file() {
+        bail!("store lock {} is not a regular file", lock_path.display());
+    }
+    FileExt::try_lock_exclusive(&lock)
+        .with_context(|| format!("store {} is in use", root.display()))?;
+    Ok(StoreWriteLock {
+        _legacy_manifest: legacy_manifest,
+        _lock: lock,
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,22 +162,119 @@ impl VerifyReport {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
+        Self::open_with_options(root, true, true)
+    }
+
+    /// Open the immutable core of a store so a missing derived generation can
+    /// be rebuilt. Normal readers must use `open`, which requires everything
+    /// published by the manifest.
+    pub fn open_for_derive_unlocked(root: &Path) -> Result<Store> {
+        Self::open_with_options(root, false, false)
+    }
+
+    pub(crate) fn open_unlocked(root: &Path) -> Result<Store> {
+        Self::open_with_options(root, true, false)
+    }
+
+    fn open_with_options(root: &Path, require_derived: bool, lock_shared: bool) -> Result<Store> {
         let root = root
             .canonicalize()
             .with_context(|| format!("store {}", root.display()))?;
+        let lock = if lock_shared {
+            Some(open_reader_lock(&root)?)
+        } else {
+            None
+        };
         let manifest = Manifest::load(&root)?;
+        let inventory = manifest.artifacts_with_legacy_derived(|relative| {
+            resolve_store_artifact(&root, relative).is_ok()
+        })?;
+        let pack_ids = manifest
+            .batches
+            .iter()
+            .flat_map(|batch| batch.packs.iter().copied())
+            .collect();
+        for relative in inventory
+            .files
+            .iter()
+            .chain(&inventory.dirs)
+            .chain(&inventory.excluded)
+            .chain(&inventory.indexes)
+            .chain(&inventory.packs)
+            .chain(
+                require_derived
+                    .then_some(&inventory.derived)
+                    .into_iter()
+                    .flatten(),
+            )
+        {
+            resolve_store_artifact(&root, relative)?;
+        }
+        let derived_segments = if require_derived {
+            inventory
+                .derived
+                .iter()
+                .map(|path| resolve_store_artifact(&root, path))
+                .collect::<Result<_>>()?
+        } else {
+            inventory
+                .derived
+                .iter()
+                .filter_map(|path| resolve_store_artifact(&root, path).ok())
+                .collect()
+        };
         Ok(Store {
-            files_segments: segments(&root.join("catalog"), "files-")?,
-            dirs_segments: segments(&root.join("catalog"), "dirs-")?,
-            index_segments: segments(&root.join("packs"), "index-")?,
+            files_segments: inventory
+                .files
+                .iter()
+                .map(|path| resolve_store_artifact(&root, path))
+                .collect::<Result<_>>()?,
+            dirs_segments: inventory
+                .dirs
+                .iter()
+                .map(|path| resolve_store_artifact(&root, path))
+                .collect::<Result<_>>()?,
+            excluded_segments: inventory
+                .excluded
+                .iter()
+                .map(|path| resolve_store_artifact(&root, path))
+                .collect::<Result<_>>()?,
+            index_segments: inventory
+                .indexes
+                .iter()
+                .map(|path| resolve_store_artifact(&root, path))
+                .collect::<Result<_>>()?,
+            derived_segments,
+            pack_ids,
             root,
             manifest,
             index: OnceLock::new(),
+            _lock: lock,
         })
     }
 
     pub fn packs_dir(&self) -> PathBuf {
         self.root.join("packs")
+    }
+
+    pub fn files_segments(&self) -> &[PathBuf] {
+        &self.files_segments
+    }
+
+    pub fn dirs_segments(&self) -> &[PathBuf] {
+        &self.dirs_segments
+    }
+
+    pub fn excluded_segments(&self) -> &[PathBuf] {
+        &self.excluded_segments
+    }
+
+    pub fn index_segments(&self) -> &[PathBuf] {
+        &self.index_segments
+    }
+
+    pub fn derived_segments(&self) -> &[PathBuf] {
+        &self.derived_segments
     }
 
     pub fn reader(&self) -> PackReader {
@@ -108,7 +288,20 @@ impl Store {
         }
         let mut m: HashMap<Sha, Vec<Loc>> = HashMap::new();
         for seg in &self.index_segments {
-            catalog::read_index(seg, |sha, loc| m.entry(sha).or_default().push(loc))?;
+            let mut undeclared_pack = None;
+            catalog::read_index(seg, |sha, loc| {
+                if !self.pack_ids.contains(&loc.pack) {
+                    undeclared_pack = Some(loc.pack);
+                }
+                m.entry(sha).or_default().push(loc);
+            })?;
+            if let Some(pack) = undeclared_pack {
+                bail!(
+                    "index {} references undeclared pack {}",
+                    seg.display(),
+                    crate::pack::pack_name(pack)
+                );
+            }
         }
         for v in m.values_mut() {
             v.sort_by_key(|l| l.part);
@@ -121,7 +314,7 @@ impl Store {
     pub fn files_under(&self, dir: &str, with_attrs: bool) -> Result<Vec<FileRow>> {
         let range = subtree_range(dir);
         let mut m: BTreeMap<Vec<u8>, FileRow> = BTreeMap::new();
-        let multi = self.files_segments.len() > 1;
+        let resolve_shadowing = self.manifest.batches.len() > 1;
         let mut v = Vec::new();
         for seg in &self.files_segments {
             catalog::scan_files(
@@ -129,7 +322,7 @@ impl Store {
                 range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())),
                 with_attrs,
                 |r| {
-                    if multi {
+                    if resolve_shadowing {
                         m.insert(r.path.as_bytes().to_vec(), r);
                     } else {
                         v.push(r);
@@ -137,7 +330,7 @@ impl Store {
                 },
             )?;
         }
-        if multi {
+        if resolve_shadowing {
             Ok(m.into_values().collect())
         } else {
             Ok(v)
@@ -145,7 +338,8 @@ impl Store {
     }
 
     /// Stream rows below `dir` whose path passes `pre`, newest batch winning for duplicate paths.
-    /// Single-segment stores stream without buffering; multi-segment stores buffer to resolve duplicates.
+    /// Single-batch stores stream without buffering across physical segments;
+    /// multi-batch stores buffer to resolve duplicates.
     pub fn scan_under(
         &self,
         dir: &str,
@@ -155,7 +349,7 @@ impl Store {
     ) -> Result<()> {
         let range = subtree_range(dir);
         let r = range.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice()));
-        if self.files_segments.len() <= 1 {
+        if self.manifest.batches.len() <= 1 {
             for seg in &self.files_segments {
                 catalog::scan_files_filtered(seg, r, with_attrs, &pre, &mut f)?;
             }
@@ -227,7 +421,7 @@ impl Store {
             )?;
         }
         let mut files: Vec<FileRow> = Vec::new();
-        if self.files_segments.len() <= 1 {
+        if self.manifest.batches.len() <= 1 {
             for seg in &self.files_segments {
                 catalog::scan_direct_children(seg, dir, true, |r| files.push(r))?;
             }

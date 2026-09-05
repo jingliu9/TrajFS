@@ -2,15 +2,17 @@
 
 use crate::adapter::Adapter;
 use crate::catalog;
-use crate::events::EventsWriter;
+use crate::events::SegmentedEventsWriter;
 use crate::hash::{sha_of_bytes, sha_of_file};
-use crate::manifest::{AdapterInfo, Batch, Manifest, RulesInfo};
+use crate::manifest::{
+    artifact_path_cmp, remove_manifest_temps, resolve_store_artifact, validate_adapter_name,
+    AdapterInfo, Batch, Manifest, RulesInfo,
+};
 use crate::pack::PackWriter;
 use crate::rules::Rules;
 use crate::walk::{walk, Candidate};
-use crate::{FileRow, Kind, Sha, CHUNK_BYTES, FORMAT_VERSION};
+use crate::{FileRow, Kind, Sha, ARTIFACT_TARGET_BYTES, FORMAT_VERSION};
 use anyhow::{bail, Context, Result};
-use fs2::FileExt;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,11 +38,51 @@ fn ts_now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Remove files a crashed batch left behind: anything newer than the manifest knows about.
+fn sorted_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by(|left, right| artifact_path_cmp(&left.path(), &right.path()));
+    Ok(entries)
+}
+
+fn ensure_store_dir(store: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("unsafe store artifact directory {}", relative.display());
+    }
+    let path = store.join(relative);
+    if !path.exists() {
+        let parent = path.parent().context("store directory has no parent")?;
+        let resolved_parent = parent.canonicalize()?;
+        if !resolved_parent.starts_with(store) {
+            bail!(
+                "store artifact directory {} has a parent outside {}",
+                path.display(),
+                store.display()
+            );
+        }
+        std::fs::create_dir(&path)?;
+    }
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(store) || !resolved.is_dir() {
+        bail!(
+            "store artifact directory {} is not a directory within {}",
+            path.display(),
+            store.display()
+        );
+    }
+    Ok(resolved)
+}
+
+/// Remove temporary and finalized artifacts not published by the manifest.
 fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
-    let mut removed = Vec::new();
-    let next_batch = m.next_batch_id();
-    let next_pack = m.next_pack_id();
+    let inventory = m.artifacts_with_legacy_derived(|relative| {
+        resolve_store_artifact(store, relative).is_ok()
+    })?;
+    let active = inventory.paths();
+    let mut removed = remove_manifest_temps(store)?;
     for (dir, prefixes) in [
         ("catalog", vec!["files-", "dirs-", "excluded-"]),
         ("packs", vec!["index-"]),
@@ -49,28 +91,19 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
         if !d.is_dir() {
             continue;
         }
-        for e in std::fs::read_dir(&d)? {
-            let e = e?;
+        for e in sorted_entries(&d)? {
             let n = e.file_name().to_string_lossy().to_string();
             let mut orphan = n.ends_with(".tmp");
-            for p in &prefixes {
-                if let Some(rest) = n.strip_prefix(p) {
-                    if let Some(id) = rest
-                        .strip_suffix(".parquet")
-                        .and_then(|s| s.parse::<u32>().ok())
-                    {
-                        if id >= next_batch {
-                            orphan = true;
-                        }
-                    }
-                }
-            }
+            let relative = PathBuf::from(dir).join(&n);
+            let generated_parquet = prefixes
+                .iter()
+                .any(|prefix| n.starts_with(prefix) && n.ends_with(".parquet"));
+            orphan |= generated_parquet && !active.contains(&relative);
             if dir == "packs" {
-                if let Some(id) = n.strip_suffix(".pack").and_then(|s| s.parse::<u32>().ok()) {
-                    if id >= next_pack {
-                        orphan = true;
-                    }
-                }
+                let generated_pack = n
+                    .strip_suffix(".pack")
+                    .is_some_and(|stem| stem.parse::<u64>().is_ok());
+                orphan |= generated_pack && !active.contains(&relative);
             }
             if orphan {
                 std::fs::remove_file(e.path())?;
@@ -80,19 +113,14 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
     }
     let derived = store.join("derived");
     if derived.is_dir() {
-        for a in std::fs::read_dir(&derived)? {
-            let a = a?;
-            if !a.path().is_dir() {
+        for a in sorted_entries(&derived)? {
+            if !a.file_type()?.is_dir() {
                 continue;
             }
-            for e in std::fs::read_dir(a.path())? {
-                let e = e?;
+            for e in sorted_entries(&a.path())? {
                 let n = e.file_name().to_string_lossy().to_string();
-                let id = n
-                    .rsplit_once('-')
-                    .and_then(|(_, r)| r.strip_suffix(".parquet"))
-                    .and_then(|s| s.parse::<u32>().ok());
-                if n.ends_with(".tmp") || id.map(|i| i >= next_batch).unwrap_or(false) {
+                let relative = PathBuf::from("derived").join(a.file_name()).join(&n);
+                if n.ends_with(".tmp") || (n.ends_with(".parquet") && !active.contains(&relative)) {
                     std::fs::remove_file(e.path())?;
                     removed.push(format!("derived/{}/{n}", a.file_name().to_string_lossy()));
                 }
@@ -103,6 +131,16 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
 }
 
 pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSummary> {
+    ingest_with_max_artifact_bytes(src, store, opts, ARTIFACT_TARGET_BYTES)
+}
+
+pub fn ingest_with_max_artifact_bytes(
+    src: &Path,
+    store: &Path,
+    opts: IngestOptions,
+    max_artifact_bytes: u64,
+) -> Result<IngestSummary> {
+    validate_adapter_name(opts.adapter.name())?;
     let t0 = Instant::now();
     let src = src
         .canonicalize()
@@ -119,9 +157,12 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
             store.display()
         );
     }
-    let lock = std::fs::File::create(store.join(".lock"))?;
-    lock.try_lock_exclusive()
-        .with_context(|| format!("another traj pack holds {}", store.join(".lock").display()))?;
+    let _lock = crate::store::lock_store_exclusive(&store).with_context(|| {
+        format!(
+            "another traj command holds {}",
+            store.join(".lock").display()
+        )
+    })?;
 
     let mut manifest = match Manifest::load(&store) {
         Ok(m) => m,
@@ -145,6 +186,7 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         },
         Err(e) => return Err(e),
     };
+    validate_adapter_name(&manifest.adapter.name)?;
     if manifest.adapter.name != opts.adapter.name() {
         bail!(
             "store was created with adapter '{}' but '{}' was requested; derived tables would disagree",
@@ -152,14 +194,18 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
             opts.adapter.name()
         );
     }
+    ensure_store_dir(&store, Path::new("catalog"))?;
+    let packs_dir = ensure_store_dir(&store, Path::new("packs"))?;
+    if store.join("derived").exists() {
+        ensure_store_dir(&store, Path::new("derived"))?;
+    }
     let orphans = remove_orphans(&store, &manifest)?;
     for o in &orphans {
         eprintln!("removed orphan {o}");
     }
+    manifest.upgrade(&store)?;
     let batch_id = manifest.next_batch_id();
     let first_pack = manifest.next_pack_id();
-    std::fs::create_dir_all(store.join("catalog"))?;
-    std::fs::create_dir_all(store.join("packs"))?;
 
     // 1. walk
     let skip = if store.starts_with(&src) {
@@ -174,7 +220,7 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
     let mut existing: HashMap<String, (i64, i64, Sha)> = HashMap::new();
     let mut known_shas: HashSet<Sha> = HashSet::new();
     if !manifest.batches.is_empty() {
-        let st = crate::store::Store::open(&store)?;
+        let st = crate::store::Store::open_unlocked(&store)?;
         st.for_each_file(false, |r| {
             existing.insert(r.path, (r.size, r.mtime_ns, r.sha));
         })?;
@@ -242,6 +288,7 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
     let bytes_total: u64 = rows.iter().map(|r| r.size as u64).sum();
 
     // 4. pack new blobs
+    let mut pw = PackWriter::with_max_bytes(&packs_dir, first_pack, max_artifact_bytes)?;
     let mut new: HashSet<Sha> = HashSet::new();
     let mut small: Vec<(Sha, PathBuf, u64)> = Vec::new();
     let mut large: Vec<(Sha, PathBuf)> = Vec::new();
@@ -254,14 +301,13 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         let c = todo[i];
         match r.kind {
             Kind::Symlink => {} // handled below from link_targets
-            Kind::File if c.size as usize <= CHUNK_BYTES => {
+            Kind::File if c.size as usize <= pw.chunk_bytes() => {
                 small.push((r.sha, c.abs.clone(), c.size))
             }
             Kind::File => large.push((r.sha, c.abs.clone())),
             Kind::Empty => {}
         }
     }
-    let mut pw = PackWriter::new(&store.join("packs"), first_pack)?;
     for (sha, t) in &link_targets {
         if new.contains(sha) {
             pw.add_bytes(*sha, t)?;
@@ -272,33 +318,17 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         pw.add_file(*sha, p)?;
     }
     let (index_rows, packs, _bin, bout) = pw.finish()?;
-    let index_path = store
-        .join("packs")
-        .join(format!("index-{batch_id:04}.parquet"));
-    catalog::write_index(&index_path, &index_rows)?;
 
     // 5. catalog
-    let files_path = store
-        .join("catalog")
-        .join(format!("files-{batch_id:04}.parquet"));
-    let mut fw = catalog::FilesWriter::create(&files_path);
-    for r in &rows {
-        fw.push(r)?;
-    }
-    fw.finish()?;
     let dirs = catalog::dirs_from_files(rows.iter(), batch_id);
-    catalog::write_dirs(
-        &store
-            .join("catalog")
-            .join(format!("dirs-{batch_id:04}.parquet")),
-        &dirs,
-    )?;
-    catalog::write_excluded(
-        &store
-            .join("catalog")
-            .join(format!("excluded-{batch_id:04}.parquet")),
-        &w.excluded,
+    let segments = catalog::write_batch_segments(
+        &store,
         batch_id,
+        &rows,
+        &dirs,
+        &w.excluded,
+        &index_rows,
+        max_artifact_bytes,
     )?;
 
     // 6. derived tables
@@ -311,17 +341,27 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
             .map(|(r, &i)| (r, todo[i]))
             .collect();
         if !traj.is_empty() {
-            let dir = store.join("derived").join(opts.adapter.name());
-            std::fs::create_dir_all(&dir)?;
-            let p = dir.join(format!("events-{batch_id:04}.parquet"));
-            let mut ew = EventsWriter::create(&p, opts.adapter.version())?;
+            ensure_store_dir(&store, Path::new("derived"))?;
+            let dir = ensure_store_dir(&store, &Path::new("derived").join(opts.adapter.name()))?;
+            let mut ew = SegmentedEventsWriter::create(
+                &dir,
+                format!("events-{batch_id:04}"),
+                opts.adapter.version(),
+                max_artifact_bytes,
+            )?;
             for (r, c) in traj {
                 let bytes = std::fs::read(&c.abs)?;
                 let evs = opts.adapter.parse_events(&r.path, &bytes);
-                ew.push(&r.path, &evs)?;
+                ew.push(&r.path, evs)?;
             }
-            ew.finish()?;
-            derived.push(format!("{}/events-{batch_id:04}", opts.adapter.name()));
+            let (_, paths) = ew.finish()?;
+            derived.extend(paths.into_iter().map(|path| {
+                format!(
+                    "{}/{}",
+                    opts.adapter.name(),
+                    path.file_stem().unwrap().to_string_lossy()
+                )
+            }));
         }
     }
 
@@ -336,15 +376,15 @@ pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSum
         new_blob_bytes,
         packed_bytes: bout,
         packs,
-        segments: vec![format!("files-{batch_id:04}")],
+        segments,
         derived,
         excluded: w.excluded.len() as u64,
         errors,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     };
     manifest.batches.push(batch.clone());
-    manifest.save(&store)?;
     write_gitattributes(&store)?;
+    manifest.save_with_limit(&store, max_artifact_bytes)?;
     Ok(IngestSummary {
         batch,
         skipped_unchanged: skipped,

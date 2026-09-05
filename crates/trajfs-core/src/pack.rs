@@ -1,5 +1,5 @@
 //! Pack files: `TRAJPACK\x01` magic followed by independent zstd frames ("chunks").
-//! `packs/index-B.parquet` maps sha → (pack, chunk_offset, chunk_len, offset, size, part).
+//! `packs/index-B[-P].parquet` maps sha → (pack, chunk_offset, chunk_len, offset, size, part).
 
 use crate::{Sha, CHUNK_BYTES, PACK_SEAL_BYTES};
 use anyhow::{bail, Context, Result};
@@ -44,6 +44,8 @@ struct Item {
 pub struct PackWriter {
     packs_dir: PathBuf,
     next_pack: u32,
+    max_pack_bytes: u64,
+    chunk_bytes: usize,
     current: Option<(u32, File, u64)>,
     pending: Vec<Item>,
     pending_bytes: usize,
@@ -55,10 +57,32 @@ pub struct PackWriter {
 
 impl PackWriter {
     pub fn new(packs_dir: &Path, first_pack_id: u32) -> Result<Self> {
+        Self::with_max_bytes(packs_dir, first_pack_id, PACK_SEAL_BYTES)
+    }
+
+    pub fn with_max_bytes(
+        packs_dir: &Path,
+        first_pack_id: u32,
+        max_pack_bytes: u64,
+    ) -> Result<Self> {
+        if max_pack_bytes <= MAGIC.len() as u64 + 2 {
+            bail!("pack size limit {max_pack_bytes} is too small");
+        }
         std::fs::create_dir_all(packs_dir)?;
+        // For test-configurable small limits, reduce the frame size too. Keeping
+        // the uncompressed input below half the pack limit leaves ample room for
+        // zstd framing even for incompressible input.
+        let chunk_bytes = CHUNK_BYTES.min(
+            ((max_pack_bytes - MAGIC.len() as u64) / 2)
+                .max(1)
+                .try_into()
+                .unwrap_or(usize::MAX),
+        );
         Ok(Self {
             packs_dir: packs_dir.to_path_buf(),
             next_pack: first_pack_id,
+            max_pack_bytes,
+            chunk_bytes,
             current: None,
             pending: Vec::new(),
             pending_bytes: 0,
@@ -69,22 +93,26 @@ impl PackWriter {
         })
     }
 
+    pub fn chunk_bytes(&self) -> usize {
+        self.chunk_bytes
+    }
+
     /// Add a whole blob (already in memory).
     pub fn add_bytes(&mut self, sha: Sha, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
-        if bytes.len() <= CHUNK_BYTES {
+        if bytes.len() <= self.chunk_bytes {
             self.push_item(Item {
                 sha,
                 part: 0,
                 bytes: bytes.to_vec(),
             })?;
         } else {
-            for (i, part) in bytes.chunks(CHUNK_BYTES).enumerate() {
+            for (i, part) in bytes.chunks(self.chunk_bytes).enumerate() {
                 self.push_item(Item {
                     sha,
-                    part: i as u16,
+                    part: i.try_into().context("blob has more than 65535 parts")?,
                     bytes: part.to_vec(),
                 })?;
             }
@@ -97,9 +125,9 @@ impl PackWriter {
         let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mut part = 0u16;
         loop {
-            let mut buf = vec![0u8; CHUNK_BYTES];
+            let mut buf = vec![0u8; self.chunk_bytes];
             let mut n = 0;
-            while n < CHUNK_BYTES {
+            while n < self.chunk_bytes {
                 let r = f.read(&mut buf[n..])?;
                 if r == 0 {
                     break;
@@ -118,7 +146,7 @@ impl PackWriter {
             part = part
                 .checked_add(1)
                 .context("blob has more than 65535 parts")?;
-            if n < CHUNK_BYTES {
+            if n < self.chunk_bytes {
                 break;
             }
         }
@@ -126,12 +154,12 @@ impl PackWriter {
     }
 
     fn push_item(&mut self, item: Item) -> Result<()> {
-        if self.pending_bytes + item.bytes.len() > CHUNK_BYTES && !self.pending.is_empty() {
+        if self.pending_bytes + item.bytes.len() > self.chunk_bytes && !self.pending.is_empty() {
             self.flush_pending()?;
         }
         self.pending_bytes += item.bytes.len();
         self.pending.push(item);
-        if self.pending_bytes >= CHUNK_BYTES {
+        if self.pending_bytes >= self.chunk_bytes {
             self.flush_pending()?;
         }
         Ok(())
@@ -151,6 +179,21 @@ impl PackWriter {
     }
 
     fn write_frame(&mut self, chunk: &Chunk, frame: &[u8]) -> Result<()> {
+        let frame_bytes = frame.len() as u64;
+        if MAGIC.len() as u64 + frame_bytes > self.max_pack_bytes {
+            bail!(
+                "compressed frame is {} bytes, larger than pack limit {}",
+                frame.len(),
+                self.max_pack_bytes
+            );
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|(_, _, written)| *written + frame_bytes > self.max_pack_bytes)
+        {
+            self.seal()?;
+        }
         let (pack_id, chunk_offset, written) = {
             let (id, file, written) = self.open_current()?;
             let off = *written as i64;
@@ -173,7 +216,7 @@ impl PackWriter {
                 },
             });
         }
-        if written >= PACK_SEAL_BYTES {
+        if written >= self.max_pack_bytes {
             self.seal()?;
         }
         Ok(())
@@ -211,7 +254,7 @@ impl PackWriter {
         let mut cur: Vec<usize> = Vec::new();
         let mut acc = 0u64;
         for (i, (_, _, size)) in blobs.iter().enumerate() {
-            if acc + size > CHUNK_BYTES as u64 && !cur.is_empty() {
+            if acc + size > self.chunk_bytes as u64 && !cur.is_empty() {
                 groups.push(std::mem::take(&mut cur));
                 acc = 0;
             }
@@ -437,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn t1_pack_seals_at_64mib_and_large_blobs_split_into_parts() {
+    fn t1_pack_stays_below_target_and_large_blobs_split_into_parts() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path(), 1).unwrap();
         // 100 MiB incompressible blob -> 100 parts, spanning two packs
@@ -453,13 +496,13 @@ mod tests {
         assert_eq!(
             packs,
             vec![1, 2],
-            "100 MiB of noise must seal pack 1 at 64 MiB and continue in pack 2"
+            "100 MiB of noise must seal pack 1 at the target and continue in pack 2"
         );
         let len1 = std::fs::metadata(dir.path().join(pack_name(1)))
             .unwrap()
             .len();
         assert!(
-            len1 >= PACK_SEAL_BYTES && len1 < PACK_SEAL_BYTES + (CHUNK_BYTES as u64) + 1024,
+            len1 <= PACK_SEAL_BYTES && len1 > PACK_SEAL_BYTES - (CHUNK_BYTES as u64) - 1024,
             "{len1}"
         );
         let parts: Vec<&IndexRow> = rows.iter().filter(|r| r.sha == big_sha).collect();
@@ -494,5 +537,32 @@ mod tests {
                 &big[3 * CHUNK_BYTES..4 * CHUNK_BYTES]
             );
         }
+    }
+
+    #[test]
+    fn configurable_pack_limit_forces_small_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let max_bytes = 32 << 10;
+        let mut writer = PackWriter::with_max_bytes(dir.path(), 1, max_bytes).unwrap();
+        let blob = noise(256 << 10, 99);
+        let sha = sha_of_bytes(&blob);
+        writer.add_bytes(sha, &blob).unwrap();
+        let (rows, packs, _, _) = writer.finish().unwrap();
+        assert!(packs.len() > 1);
+        for pack in packs {
+            assert!(
+                std::fs::metadata(dir.path().join(pack_name(pack)))
+                    .unwrap()
+                    .len()
+                    <= max_bytes
+            );
+        }
+        let mut locations: Vec<Loc> = rows
+            .into_iter()
+            .filter(|row| row.sha == sha)
+            .map(|row| row.loc)
+            .collect();
+        locations.sort_by_key(|loc| loc.part);
+        assert_eq!(PackReader::new(dir.path()).blob(&locations).unwrap(), blob);
     }
 }

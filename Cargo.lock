@@ -2157,6 +2157,7 @@ dependencies = [
  "fs2",
  "globset",
  "hex",
+ "libc",
  "parquet",
  "proptest",
  "rayon",

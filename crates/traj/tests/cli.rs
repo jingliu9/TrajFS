@@ -609,6 +609,20 @@ fn t5c_other_formats_and_rederive() {
     let e = packed("none");
     let before = snapshot(&e.store.join("packs"), &[]);
     let before_cat = snapshot(&e.store.join("catalog"), &[]);
+    let before_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(e.store.join("MANIFEST.json")).unwrap()).unwrap();
+    let old_derived: Vec<PathBuf> = before_manifest["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|batch| batch["derived"].as_array().unwrap())
+        .map(|entry| {
+            e.store
+                .join("derived")
+                .join(entry.as_str().unwrap())
+                .with_extension("parquet")
+        })
+        .collect();
     traj()
         .arg("-S")
         .arg(&e.store)
@@ -618,6 +632,20 @@ fn t5c_other_formats_and_rederive() {
         .success();
     assert_eq!(snapshot(&e.store.join("packs"), &[]), before);
     assert_eq!(snapshot(&e.store.join("catalog"), &[]), before_cat);
+    let after_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(e.store.join("MANIFEST.json")).unwrap()).unwrap();
+    let new_derived: Vec<&str> = after_manifest["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|batch| batch["derived"].as_array().unwrap())
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(!new_derived.is_empty());
+    assert!(new_derived
+        .iter()
+        .all(|entry| entry.contains("/events-rebuild-")));
+    assert!(old_derived.iter().all(|path| !path.exists()));
     let q = traj()
         .arg("-S")
         .arg(&e.store)
@@ -633,6 +661,308 @@ fn t5c_other_formats_and_rederive() {
         "{}",
         String::from_utf8_lossy(&q.stdout)
     );
+}
+
+#[test]
+fn derive_failure_keeps_the_previous_generation_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let raw = tmp.path().join("raw");
+    let store = root.join("stores/atomic.trajstore");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&raw).unwrap();
+    let mut x = 7u64;
+    let payload: String = (0..120_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (b'a' + (x % 26) as u8) as char
+        })
+        .collect();
+    write(
+        &raw.join("events.jsonl"),
+        format!(
+            "{{\"type\":\"small\",\"payload\":\"ok\"}}\n\
+             {{\"type\":\"large\",\"payload\":\"{payload}\"}}\n"
+        )
+        .as_bytes(),
+    );
+    let config = |max: Option<u64>| {
+        let hook = max
+            .map(|bytes| format!("[hook]\nmax_file_bytes = {bytes}\n"))
+            .unwrap_or_default();
+        format!(
+            "data_root = {:?}\nstore_root = \"stores\"\nadapter = \"jsonl\"\nrules = \"none\"\n{hook}",
+            raw
+        )
+    };
+    fs::write(root.join("trajfs.toml"), config(None)).unwrap();
+    traj()
+        .current_dir(&root)
+        .args(["pack"])
+        .arg(&raw)
+        .arg("--out")
+        .arg(&store)
+        .args(["--adapter", "jsonl", "--rules", "none", "--no-derive"])
+        .assert()
+        .success();
+    traj()
+        .current_dir(&root)
+        .arg("-S")
+        .arg(&store)
+        .args(["derive", "--adapter", "jsonl"])
+        .assert()
+        .success();
+
+    let manifest_path = store.join("MANIFEST.json");
+    let published = fs::read(&manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&published).unwrap();
+    let active: Vec<PathBuf> = manifest["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|batch| batch["derived"].as_array().unwrap())
+        .map(|entry| {
+            store
+                .join("derived")
+                .join(entry.as_str().unwrap())
+                .with_extension("parquet")
+        })
+        .collect();
+    assert!(!active.is_empty());
+
+    fs::write(root.join("trajfs.toml"), config(Some(8192))).unwrap();
+    traj()
+        .current_dir(&root)
+        .arg("-S")
+        .arg(&store)
+        .args(["derive", "--adapter", "jsonl"])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&manifest_path).unwrap(), published);
+    assert!(active.iter().all(|path| path.is_file()));
+    assert!(!fs::read_dir(store.join("derived/jsonl"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .any(|name| name.starts_with("events-rebuild-0002")));
+    let query = traj()
+        .current_dir(&root)
+        .arg("-S")
+        .arg(&store)
+        .args(["sql", "--csv", "select count(*) from events"])
+        .output()
+        .unwrap();
+    assert!(query.status.success());
+    assert!(String::from_utf8_lossy(&query.stdout).contains("\n2"));
+}
+
+#[test]
+fn derive_does_not_delete_files_held_by_an_active_reader() {
+    let e = packed("none");
+    let reader = trajfs_core::Store::open(&e.store).unwrap();
+    let old_derived = reader.derived_segments().to_vec();
+    let blocked = traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["derive", "--adapter"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rounds-v2.toml"))
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert!(old_derived.iter().all(|path| path.is_file()));
+    drop(reader);
+
+    traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["derive", "--adapter"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rounds-v2.toml"))
+        .assert()
+        .success();
+    assert!(old_derived.iter().all(|path| !path.exists()));
+}
+
+#[test]
+fn readers_do_not_need_write_access_or_create_legacy_locks() {
+    let e = packed("none");
+    let lock = e.store.join(".lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+    trajfs_core::Store::open(&e.store)
+        .unwrap()
+        .verify(false)
+        .unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::remove_file(&lock).unwrap();
+    fs::set_permissions(&e.store, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let reader = trajfs_core::Store::open(&e.store).unwrap();
+    assert!(!lock.exists());
+    reader.verify(false).unwrap();
+    let blocked = traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["derive", "--adapter"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rounds-v2.toml"))
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert!(!lock.exists());
+    drop(reader);
+    fs::set_permissions(&e.store, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn oversized_manifest_is_never_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let raw = tmp.path().join("raw");
+    let store = root.join("stores/manifest-limit.trajstore");
+    fs::create_dir_all(&root).unwrap();
+    write(&raw.join("file.txt"), b"content\n");
+    let max_bytes = 16 << 10;
+    fs::write(
+        root.join("trajfs.toml"),
+        format!(
+            "data_root = {:?}\nstore_root = \"stores\"\nadapter = \"none\"\nrules = \"none\"\n\
+             [hook]\nmax_file_bytes = {max_bytes}\n",
+            raw
+        ),
+    )
+    .unwrap();
+    let long_label = "x".repeat(20_000);
+    traj()
+        .current_dir(&root)
+        .args(["pack"])
+        .arg(&raw)
+        .arg("--out")
+        .arg(&store)
+        .args([
+            "--adapter",
+            "none",
+            "--rules",
+            "none",
+            "--no-derive",
+            "--label",
+            &long_label,
+        ])
+        .assert()
+        .failure();
+    assert!(!store.join("MANIFEST.json").exists());
+    assert!(!store.join("MANIFEST.json.tmp").exists());
+
+    traj()
+        .current_dir(&root)
+        .args(["pack"])
+        .arg(&raw)
+        .arg("--out")
+        .arg(&store)
+        .args(["--adapter", "none", "--rules", "none", "--no-derive"])
+        .assert()
+        .success();
+    assert!(store.join("MANIFEST.json").metadata().unwrap().len() <= max_bytes);
+}
+
+#[test]
+fn malicious_adapter_names_cannot_escape_derived_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let store = tmp.path().join("store");
+    write(&src.join("file.txt"), b"content\n");
+    let adapter = tmp.path().join("bad-adapter.toml");
+    fs::write(
+        &adapter,
+        "name = \"../../../escaped\"\nversion = 1\n[trajectories]\n\
+         globs = [\"**/*.jsonl\"]\nformat = \"jsonl\"\n",
+    )
+    .unwrap();
+    traj()
+        .args(["pack"])
+        .arg(&src)
+        .arg("--out")
+        .arg(&store)
+        .args(["--adapter", adapter.to_str().unwrap(), "--rules", "none"])
+        .assert()
+        .failure();
+    assert!(!store.exists());
+    assert!(!tmp.path().join("escaped").exists());
+
+    let e = packed("none");
+    let bad = e._tmp.path().join("bad-adapter.toml");
+    fs::write(
+        &bad,
+        "name = \"../../../escaped\"\nversion = 1\n[trajectories]\n\
+         globs = [\"**/*.jsonl\"]\nformat = \"jsonl\"\n",
+    )
+    .unwrap();
+    traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["derive", "--adapter"])
+        .arg(&bad)
+        .assert()
+        .failure();
+    assert!(!e._tmp.path().join("escaped").exists());
+    assert!(!e.store.join("escaped").exists());
+}
+
+#[test]
+fn legacy_rederived_store_remains_readable() {
+    let e = packed("none");
+    let manifest_path = e.store.join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let adapter_name = manifest["adapter"]["name"].as_str().unwrap();
+    let declared = manifest["batches"][0]["derived"][0].as_str().unwrap();
+    let old_path = e
+        .store
+        .join("derived")
+        .join(declared)
+        .with_extension("parquet");
+    let legacy_path = e
+        .store
+        .join("derived")
+        .join(adapter_name)
+        .join("events-0000.parquet");
+    fs::rename(old_path, legacy_path).unwrap();
+    manifest["format"] = serde_json::json!(1);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["verify", "--deep"])
+        .assert()
+        .success();
+    let query = traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["sql", "--csv", "select count(*) from events"])
+        .output()
+        .unwrap();
+    assert!(query.status.success());
+    assert!(String::from_utf8_lossy(&query.stdout).contains("\n4"));
+    traj()
+        .args(["pack"])
+        .arg(&e.src)
+        .arg("--out")
+        .arg(&e.store)
+        .args(["--adapter", &adapter(), "--rules", "none"])
+        .assert()
+        .success();
+    let upgraded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    assert_eq!(upgraded["format"], trajfs_core::FORMAT_VERSION);
+    assert!(upgraded["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|batch| batch["derived"].as_array().unwrap())
+        .any(|entry| entry == "rounds-layout/events-0000"));
 }
 
 #[test]
@@ -678,26 +1008,30 @@ fn t3_integrity_detects_corruption() {
         String::from_utf8_lossy(&v.stdout)
     );
     fs::write(&pack, &orig).unwrap();
-    // missing index segment: catalog rows without a location
+    // Missing manifest-declared artifacts fail both quick and deep verification.
     let idx = e.store.join("packs/index-0001.parquet");
     let idx_bytes = fs::read(&idx).unwrap();
     fs::remove_file(&idx).unwrap();
-    let v = traj()
+    for args in [vec!["verify"], vec!["verify", "--deep"]] {
+        let v = traj().arg("-S").arg(&e.store).args(args).output().unwrap();
+        assert!(!v.status.success());
+        assert!(
+            String::from_utf8_lossy(&v.stderr).contains("manifest declares missing artifact"),
+            "{}",
+            String::from_utf8_lossy(&v.stderr)
+        );
+    }
+    fs::write(&idx, idx_bytes).unwrap();
+    fs::remove_file(&pack).unwrap();
+    let missing_pack = traj()
         .arg("-S")
         .arg(&e.store)
         .args(["verify"])
         .output()
         .unwrap();
-    assert_eq!(v.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&v.stdout).contains("without a blob"));
-    fs::write(&idx, idx_bytes).unwrap();
-    fs::remove_file(&pack).unwrap();
-    traj()
-        .arg("-S")
-        .arg(&e.store)
-        .args(["verify"])
-        .assert()
-        .code(1);
+    assert!(!missing_pack.status.success());
+    assert!(String::from_utf8_lossy(&missing_pack.stderr)
+        .contains("manifest declares missing artifact"));
     fs::remove_file(e.store.join("MANIFEST.json")).unwrap();
     traj()
         .arg("-S")
@@ -762,9 +1096,36 @@ fn t8_incremental_batches_add_only_new_content() {
     let m: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(e.store.join("MANIFEST.json")).unwrap()).unwrap();
     assert_eq!(m["batches"][2]["paths"], 0);
-    // orphan cleanup: a stray next-batch segment and a tmp pack vanish on the next pack
+    // Unpublished finalized files are invisible to readers and SQL, then
+    // orphan cleanup removes them on the next pack.
+    let adapter_name = m["adapter"]["name"].as_str().unwrap();
     write(&e.store.join("catalog/files-0009.parquet"), b"junk");
+    write(&e.store.join("catalog/dirs-0009-0002.parquet"), b"junk");
+    write(&e.store.join("packs/index-0009-0002.parquet"), b"junk");
+    write(
+        &e.store
+            .join(format!("derived/{adapter_name}/events-0009-0002.parquet")),
+        b"junk",
+    );
+    write(&e.store.join("packs/9999.pack"), b"junk");
     write(&e.store.join("packs/0009.pack.tmp"), b"junk");
+    write(&e.store.join("MANIFEST.json.tmp"), b"junk");
+    traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args(["verify", "--deep"])
+        .assert()
+        .success();
+    traj()
+        .arg("-S")
+        .arg(&e.store)
+        .args([
+            "sql",
+            "--csv",
+            "select (select count(*) from files), (select count(*) from events)",
+        ])
+        .assert()
+        .success();
     traj()
         .args(["pack"])
         .arg(&e.src)
@@ -774,7 +1135,15 @@ fn t8_incremental_batches_add_only_new_content() {
         .assert()
         .success();
     assert!(!e.store.join("catalog/files-0009.parquet").exists());
+    assert!(!e.store.join("catalog/dirs-0009-0002.parquet").exists());
+    assert!(!e.store.join("packs/index-0009-0002.parquet").exists());
+    assert!(!e
+        .store
+        .join(format!("derived/{adapter_name}/events-0009-0002.parquet"))
+        .exists());
+    assert!(!e.store.join("packs/9999.pack").exists());
     assert!(!e.store.join("packs/0009.pack.tmp").exists());
+    assert!(!e.store.join("MANIFEST.json.tmp").exists());
 }
 
 #[test]
@@ -1030,6 +1399,15 @@ fn t9b_separation_and_hook() {
         .contains("traj-skill:start"));
     assert!(data.join(".gitignore").is_file());
     traj().current_dir(&repo).arg("doctor").assert().success();
+    git(&["add", "trajfs.toml"]);
+    git(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-q",
+        "-m",
+        "traj policy",
+    ]);
     // pack refuses a store inside data_root and a source inside store_root
     fixture(&data.join("run1"));
     traj()

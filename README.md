@@ -20,20 +20,35 @@ A store is a directory (`<run>.trajstore/`) of immutable files:
 
 ```
 MANIFEST.json                 format, store id, source, adapter, rule profile, ingestion batches
-catalog/files-NNNN.parquet    path, dir, name, kind, mode, size, sha256, mtime, batch, attrs (map)
-catalog/dirs-NNNN.parquet     per-directory counts and bytes
-catalog/excluded-NNNN.parquet what the rule profile left out, and why
-packs/NNNN.pack               zstd frames of up to 1 MiB of concatenated blobs; sealed at 64 MiB
-packs/index-NNNN.parquet      sha256 -> (pack, frame offset, frame length, offset in frame, size, part)
-derived/<adapter>/events-NNNN.parquet   trajectories parsed into a stable event envelope (rebuildable)
+catalog/files-NNNN[-PPPP].parquet    path, dir, name, kind, mode, size, sha256, mtime, batch, attrs
+catalog/dirs-NNNN[-PPPP].parquet     per-directory counts and bytes
+catalog/excluded-NNNN[-PPPP].parquet what the rule profile left out, and why
+packs/NNNN.pack                       zstd frames of up to 1 MiB of concatenated blobs
+packs/index-NNNN[-PPPP].parquet      sha256 -> (pack, frame offset, frame length, offset, size, part)
+derived/<adapter>/events-NNNN[-PPPP].parquet   parsed event envelope (rebuildable)
+derived/<adapter>/events-rebuild-GGGG[-PPPP].parquet   transactional full rebuild
 ```
 
+- **Git-safe physical segments.** Packs, Parquet files, and the serialized manifest are capped at the lower of the
+  configured hook limit and a conservative 60 MiB target. Oversized batch tables use a `-PPPP` part suffix. The
+  `files`, `dirs`, `excluded`, and `index` tables use synchronized suffixes.
+- **Manifest publication boundary.** Readers and SQL open only artifacts declared by `MANIFEST.json`; interrupted,
+  unlisted output is invisible and removed by the next pack. Missing declarations fail store opening, and the hook
+  rejects both missing and surplus finalized artifacts. Format-1 stores remain readable; new writes upgrade them to
+  format 2 with explicit derived-file publication. Manifest replacement uses a unique, exclusive-created,
+  no-follow temporary file that is flushed and synced before rename.
 - **Content-addressed.** A path maps to a sha256; a sha256 maps to bytes in a pack. Duplicate content is stored once,
   across rounds and across the runner's own snapshot copies.
 - **Packs, not Parquet, for bytes.** Reading one file is a `pread` of one frame plus a decompress of at most 1 MiB,
   a few microseconds to a few milliseconds. Parquet holds only the catalog and the derived tables.
 - **Append-only batches.** Each `traj pack` adds one batch: new paths, only the blobs not seen before, and its own
   catalog segments. Nothing already written is modified, so every commit is additive.
+- **Transactional derivation.** `traj derive` writes a uniquely named replacement generation, atomically publishes it
+  through the manifest, and only then removes the prior generation. Readers retain a shared store lock for their
+  lifetime; pack and derive hold the exclusive lock through publication and cleanup. Readers open `.lock` read-only;
+  legacy stores without it use a shared lock on `MANIFEST.json` while the first writer bootstraps `.lock`.
+- **Safe derived paths.** Adapter names are one non-empty path component, and every resolved artifact must be a regular
+  file inside the canonical store root.
 - **Every byte is verifiable.** `traj verify --deep` re-hashes the store; `cat` checks the sha on every read.
 
 ## Quick start
@@ -68,9 +83,10 @@ traj doctor
 `init` writes `trajfs.toml`, a `.gitattributes` for the store directory, a catch-all `.gitignore` in the data root,
 installs the pre-commit hook (a symlink to the `traj` binary), and exports an agent skill to
 `.claude/skills/traj/SKILL.md` and `AGENTS.md`. The hook refuses commits that stage raw run paths, more than ten
-thousand new paths, files over 65 MiB, or nested `store_root` results that are not complete, readable TrajFS
-stores. It prints the `traj pack` / `traj commit` commands to use instead. Deleting tracked raw paths stays
-allowed, so an existing repository can migrate.
+thousand new paths, files over 65 MiB, symlink/gitlink-backed store artifacts, or nested `store_root` results that are
+not complete, readable TrajFS stores. It prints the `traj pack` / `traj commit` commands to use instead. Deleting tracked raw paths stays
+allowed, so an existing repository can migrate. Policy and file sizes are read from the staged Git objects, not from
+potentially different working-tree contents.
 
 Then, per run or continuously:
 
@@ -120,7 +136,7 @@ traj -S S sql "select path, json_extract_string(text(sha),'$.verdict') from file
 ## Testing
 
 ```
-cargo test --release                                            # 19 tests, ~8 s: format, round trips (proptest),
+cargo test --release                                            # 44 tests: format, round trips (proptest),
                                                                 # integrity, catalog verbs vs ls/find/du, grep vs grep,
                                                                 # events, SIGKILL recovery, watch, hook, skill examples
 TRAJ_SLOW_SRC=<run dir> TRAJ_SLOW_ADAPTER=<adapter.toml> \
@@ -148,7 +164,7 @@ review-bench/            the prototype scripts and numbers from the review (hist
 
 ## Status
 
-First release of the format (`"format": 1`). The design, the CLI and the test plan in `docs/PLAN.md` are
-implemented; measurements in §14 and §15 come from a 2.1 M-path, 12 GB run. Open items: DuckDB-backed full-catalog
+Current writes use format 2 and readers remain compatible with format 1. The design, the CLI and the test plan in
+`docs/PLAN.md` are implemented; measurements in §14 and §15 come from a 2.1 M-path, 12 GB run. Open items: DuckDB-backed full-catalog
 scans (find by attribute is ~1 s on 2 M rows), `traj compact`, and the runner-side output-root guard described in
 §6.1.

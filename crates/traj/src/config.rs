@@ -45,9 +45,13 @@ fn default_max_paths() -> usize {
     10_000
 }
 fn default_max_bytes() -> u64 {
-    // A pack seals after crossing 64 MiB, so its final <=1 MiB frame can
-    // legitimately carry it slightly above the seal threshold.
     DEFAULT_MAX_FILE_BYTES
+}
+
+pub fn artifact_target_bytes(cfg: Option<&Config>) -> u64 {
+    cfg.map(|config| config.file.hook.max_file_bytes)
+        .unwrap_or(DEFAULT_MAX_FILE_BYTES)
+        .min(trajfs_core::ARTIFACT_TARGET_BYTES)
 }
 
 fn default_store_root() -> PathBuf {

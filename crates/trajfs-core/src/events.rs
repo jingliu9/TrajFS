@@ -6,7 +6,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -129,5 +129,158 @@ impl EventsWriter {
         self.flush()?;
         self.writer.close()?;
         Ok(self.rows)
+    }
+}
+
+struct EventRow {
+    trajectory: String,
+    event: Event,
+}
+
+fn event_row_weight(row: &EventRow) -> usize {
+    let event = &row.event;
+    row.trajectory
+        .len()
+        .saturating_add(event.r#type.len())
+        .saturating_add(event.id.as_ref().map_or(0, String::len))
+        .saturating_add(event.parent_id.as_ref().map_or(0, String::len))
+        .saturating_add(event.actor.as_ref().map_or(0, String::len))
+        .saturating_add(event.tool_name.as_ref().map_or(0, String::len))
+        .saturating_add(event.payload_json.len())
+        .saturating_add(96)
+}
+
+fn write_event_rows(path: &Path, rows: &[EventRow], adapter_version: u16) -> Result<()> {
+    let mut writer = EventsWriter::create(path, adapter_version)?;
+    for row in rows {
+        writer.push(&row.trajectory, std::slice::from_ref(&row.event))?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+pub struct SegmentedEventsWriter {
+    dir: PathBuf,
+    stem: String,
+    adapter_version: u16,
+    max_bytes: u64,
+    buffer: Vec<EventRow>,
+    buffer_weight: u64,
+    paths: Vec<PathBuf>,
+    rows: usize,
+}
+
+impl SegmentedEventsWriter {
+    pub fn create(
+        dir: &Path,
+        stem: impl Into<String>,
+        adapter_version: u16,
+        max_bytes: u64,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            stem: stem.into(),
+            adapter_version,
+            max_bytes,
+            buffer: Vec::new(),
+            buffer_weight: 0,
+            paths: Vec::new(),
+            rows: 0,
+        })
+    }
+
+    pub fn push(&mut self, trajectory: &str, events: Vec<Event>) -> Result<()> {
+        let budget = (self.max_bytes.saturating_mul(3) / 4).max(1);
+        for event in events {
+            let row = EventRow {
+                trajectory: trajectory.to_string(),
+                event,
+            };
+            let weight = event_row_weight(&row).max(1) as u64;
+            if !self.buffer.is_empty() && self.buffer_weight.saturating_add(weight) > budget {
+                self.flush()?;
+            }
+            self.buffer_weight = self.buffer_weight.saturating_add(weight);
+            self.buffer.push(row);
+            self.rows += 1;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let rows = std::mem::take(&mut self.buffer);
+        self.buffer_weight = 0;
+        let mut paths = crate::catalog::write_sized_segments(
+            &self.dir,
+            &self.stem,
+            &rows,
+            self.max_bytes,
+            self.paths.len() + 1,
+            |path, rows| write_event_rows(path, rows, self.adapter_version),
+        )?;
+        self.paths.append(&mut paths);
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<(usize, Vec<PathBuf>)> {
+        self.flush()?;
+        if self.paths.is_empty() {
+            self.paths = crate::catalog::write_sized_segments(
+                &self.dir,
+                &self.stem,
+                &[],
+                self.max_bytes,
+                1,
+                |path, rows| write_event_rows(path, rows, self.adapter_version),
+            )?;
+        }
+        crate::catalog::rename_single_segment(&mut self.paths, &self.dir, &self.stem)?;
+        Ok((self.rows, self.paths))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_tables_split_at_a_configurable_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let max_bytes = 32 << 10;
+        let mut writer =
+            SegmentedEventsWriter::create(tmp.path(), "events-0003", 9, max_bytes).unwrap();
+        for i in 0..400 {
+            writer
+                .push(
+                    &format!("rounds/{i:04}/events.jsonl"),
+                    vec![Event {
+                        seq: i,
+                        r#type: format!("event-{i}"),
+                        payload_json: format!(
+                            "{{\"id\":{i},\"payload\":\"{}\"}}",
+                            format!("{i:08x}").repeat(64)
+                        ),
+                        ..Default::default()
+                    }],
+                )
+                .unwrap();
+        }
+        let (rows, paths) = writer.finish().unwrap();
+        assert_eq!(rows, 400);
+        assert!(paths.len() > 1, "{paths:?}");
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| crate::catalog::row_count(path).unwrap())
+                .sum::<i64>(),
+            400
+        );
+        for path in paths {
+            assert!(path.metadata().unwrap().len() <= max_bytes);
+        }
     }
 }
