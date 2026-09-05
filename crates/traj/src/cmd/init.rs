@@ -34,6 +34,9 @@ pub struct InitArgs {
     /// Do not install the agent skill files
     #[arg(long)]
     pub no_skill: bool,
+    /// Default mountpoint for `traj mount` (absolute, outside every git work tree)
+    #[arg(long)]
+    pub mount_root: Option<PathBuf>,
 }
 
 pub fn run(a: InitArgs) -> Result<i32> {
@@ -86,6 +89,7 @@ pub fn run(a: InitArgs) -> Result<i32> {
             store_root: a.store_root.clone(),
             adapter: adapter.clone(),
             rules: a.rules.clone(),
+            mount_root: a.mount_root.clone(),
             hook,
         },
         dir: repo.clone(),
@@ -104,6 +108,19 @@ pub fn run(a: InitArgs) -> Result<i32> {
         std::fs::write(&ignore, "# trajfs data_root: raw run trees are never committed; pack them with `traj pack`.\n*\n")?;
     }
     install_hook(&repo, a.force)?;
+    if let Some(mr) = &a.mount_root {
+        let mr = if mr.is_absolute() {
+            mr.clone()
+        } else {
+            repo.join(mr)
+        };
+        let f = crate::cmd::mount::write_vscode_exclude(&repo, &mr)?;
+        println!(
+            "mount_root {}; VS Code watcher exclude written to {}",
+            mr.display(),
+            f.display()
+        );
+    }
     if !a.no_skill {
         crate::cmd::skill::export_all(&cfg)?;
     }
@@ -260,6 +277,29 @@ pub fn doctor() -> Result<i32> {
         }
     }
     println!("stores:      {n} under {}", cfg.store_root().display());
+    // live traj mounts (docs/PLAN-fuse.md §3)
+    let mounts = crate::cmd::mount::traj_mounts();
+    if mounts.is_empty() {
+        println!("mounts:      none");
+    }
+    for mp in mounts {
+        let stale = crate::cmd::mount::is_stale(&mp);
+        let in_repo = git_toplevel(&mp).is_some();
+        let in_roots = is_inside(&mp, &cfg.data_root()) || is_inside(&mp, &cfg.store_root());
+        if stale {
+            println!(
+                "mounts:      PROBLEM {} is stale (its traj process is gone); run `traj umount {}`",
+                mp.display(),
+                mp.display()
+            );
+            problems += 1;
+        } else if in_repo || in_roots {
+            println!("mounts:      PROBLEM {} is inside a git work tree or a root; unmount and mount elsewhere", mp.display());
+            problems += 1;
+        } else {
+            println!("mounts:      {}", mp.display());
+        }
+    }
     let _ = is_inside;
     println!(
         "{}",

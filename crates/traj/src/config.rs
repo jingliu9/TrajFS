@@ -16,6 +16,9 @@ pub struct ConfigFile {
     pub adapter: String,
     #[serde(default = "default_rules")]
     pub rules: String,
+    /// Default mountpoint for `traj mount` (docs/PLAN-fuse.md §3); outside every git work tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_root: Option<PathBuf>,
     #[serde(default)]
     pub hook: HookConfig,
 }

@@ -5,6 +5,7 @@ pub mod derive;
 pub mod grep;
 pub mod hook;
 pub mod init;
+pub mod mount;
 pub mod pack;
 pub mod read;
 pub mod skill;

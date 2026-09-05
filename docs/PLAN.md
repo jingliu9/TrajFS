@@ -29,7 +29,7 @@ Goals, in priority order:
    `events` table parsed from trajectories), with `blob(sha)` to reach bytes from SQL.
 5. **Integrity is verifiable.** Every path carries a sha256; `traj verify` proves a store, or a clone of it, is intact.
 
-Non-goals: a mounted filesystem (dropped: `extract`/`edit` cover human viewing); in-place modification of stored content; cross-store dedupe (a shared
+Non-goals: FUSE as the storage format (a read-only mount over the store does exist: `traj mount`, `PLAN-fuse.md`); in-place modification of stored content; cross-store dedupe (a shared
 pack directory is a V2 option); defining a universal trajectory schema (adapters own that, and the raw bytes are always
 kept).
 
@@ -291,6 +291,8 @@ All verbs take `--store <dir>` (or `TRAJ_STORE`) and a path relative to the stor
 | `traj derive [--adapter A] [--force]` | (re)build derived tables from packs | packs → derived |
 | `traj verify [--deep]` | catalog ↔ index ↔ packs consistency; `--deep` re-hashes every blob | all |
 | `traj edit <path>` | extract to a temp file, run `$EDITOR`, print a diff; never written back | |
+| `traj mount [-S S]... <mnt> [--daemon]` | read-only FUSE tree of one store, or one directory per store under `store_root`; new batches and stores appear without remounting (`PLAN-fuse.md`) | catalog + packs |
+| `traj umount [<mnt>]` | `fusermount3 -u`; all traj mounts when no path is given | |
 | `traj watch <src> --store S` | pack whenever the adapter reports a batch ready | |
 
 Latency targets (warm, 2 M-path store): `ls`/`find` ≤ 50 ms; `stat` ≤ 20 ms; `cat` ≤ 5 ms after a ≤ 100 ms one-time
@@ -385,7 +387,7 @@ Prototype numbers on the reference run; the Rust build must meet or beat them.
 
 ## 9. Reserved
 
-(Section number kept so cross-references in `docs/idea-review.md` stay valid; FUSE was removed from the plan in draft 2.5.)
+The read-only FUSE projection is designed, built and measured in `PLAN-fuse.md` (2026-09-04): a mount over the same catalog and packs, never the storage format. `vscode-viewer.md` records why a mount was chosen over an editor plugin (not pursued).
 
 ## 10. Milestones
 
@@ -397,6 +399,7 @@ Prototype numbers on the reference run; the Rust build must meet or beat them.
 | M3 | `grep`, `sql` with `blob()/text()`, `derive`, adapters `jsonl`, `copilot-cli`, `claude-code` | T5 green on both real formats |
 | M4 | rule profiles, incremental batches, manifest, `traj init/commit/doctor` + hook (§6.1), declared adapters + scaffold, onesw-gen `output_root` guard; four fourth-grid stores committed | T7–T9, T9b, T9c green; §8 size/file targets met |
 | M5 | `traj watch`, `traj init/skill export`, onesw Phase A hook; `README.md`; `OPERATIONS.md` §7 | one live round packed automatically; T11 green; skill installed in the farm repo |
+| M6 | `traj mount`/`umount`, `doctor` mounts line, `mount_root`; `PLAN-fuse.md` | T10 green; a round of the reference run opens in VS Code over Remote-SSH; `PLAN-fuse.md` §16 numbers recorded |
 
 ## 11. Test plan
 
@@ -557,6 +560,8 @@ running `git add` on outputs. So the binary ships the skill and installs it:
 - The skill is data, not policy: it repeats what the hook and the roots already enforce, so an agent that ignores it
   still cannot do damage; it only wastes time.
 
+**T10 Mount.** Ten tests in `cli.rs` (`t10::…`) plus the slow `t10k` against a real store: byte-identical to `extract` (modes, symlinks, empty files, exec bits), `ls -A`/`find`/`du` equal to the catalog verbs, read-only (`EROFS` for every write path), xattrs, `grep -rlE` equal to `traj grep`, eight concurrent readers, a batch landing behind a live mount (new paths, re-recorded content, old handles), corruption as `EIO` for the affected file only, SIGTERM/SIGKILL/stale/busy/lazy/daemon lifecycle, refusals, the multi-store root. Details and bounds: `PLAN-fuse.md` §12.
+
 **T11 Skill.** `traj skill export` renders without placeholders; every command in the skill's examples is executed
 against the synthetic fixture store in tests and must exit 0 with the documented output shape; every verb named in the
 skill exists in `traj --help` and vice versa; `doctor` warns on a version mismatch; `init` on a repo with an existing
@@ -641,6 +646,7 @@ After review the §11 plan was implemented in full rather than sampled. `cargo t
 | T9 git | `t9b_separation_and_hook` | hook refusal, migration commit allowed, `traj commit`, clone verifies, push of store vs raw tree against a local bare remote (path counts compared, times printed) |
 | T9b/T9c separation, scaffold | `t9b_…`, `t9c_init_scaffolds_an_adapter_for_the_target_repo` | |
 | T11 skill | `t11_skill_mentions_every_verb_and_carries_the_version` | every worked example in the skill is executed against a fixture store |
+| T10 mount | `t10::t10_…` … `t10::t10j_…`, `t10::t10k_reference_store` (slow, `TRAJ_SLOW_STORE`) | the FUSE projection (`PLAN-fuse.md` §12, §16); skipped with a message without `/dev/fuse` |
 | criterion / bench | `crates/traj/benches/verbs.rs`, `traj bench` | |
 
 Defects the full plan caught that the sampled tests had not:

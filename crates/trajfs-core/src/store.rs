@@ -172,7 +172,11 @@ impl Store {
         Self::open_with_options(root, false, false)
     }
 
-    pub(crate) fn open_unlocked(root: &Path) -> Result<Store> {
+    /// Open without the shared reader lock: for a long-lived reader such as `traj mount`, which would otherwise
+    /// block every `pack` for as long as it runs. Safe because a store only grows (packs and segments are
+    /// append-only and the manifest is published last); such a reader re-opens when the manifest changes and
+    /// keeps its current view if the new one does not validate.
+    pub fn open_unlocked(root: &Path) -> Result<Store> {
         Self::open_with_options(root, true, false)
     }
 
@@ -509,6 +513,15 @@ impl Store {
 
     pub fn read_sha(&self, reader: &mut PackReader, sha: &Sha) -> Result<Vec<u8>> {
         reader.blob(self.parts(sha)?)
+    }
+
+    /// Bytes of a blob by sha; verifies the content against the sha when `verify` (used by `traj mount`).
+    pub fn read_blob(&self, reader: &mut PackReader, sha: &Sha, verify: bool) -> Result<Vec<u8>> {
+        let bytes = reader.blob(self.parts(sha)?)?;
+        if verify && sha_of_bytes(&bytes) != *sha {
+            bail!("blob {}: content does not match its sha", hex::encode(sha));
+        }
+        Ok(bytes)
     }
 
     /// Materialise everything below `prefix` (a file or a directory) into `dst`.

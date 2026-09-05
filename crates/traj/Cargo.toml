@@ -22,16 +22,23 @@ globset.workspace = true
 chrono.workspace = true
 walkdir.workspace = true
 similar = "2"
+fuser = { version = "0.18", optional = true }
+signal-hook = { version = "0.3", optional = true }
+libc = { version = "0.2", optional = true }
 duckdb = { version = "1", features = ["bundled", "vscalar", "vscalar-arrow"], optional = true }
 
 [features]
-default = ["sql"]
+default = ["sql", "mount"]
 sql = ["dep:duckdb"]
+# read-only FUSE projection (`traj mount`, docs/PLAN-fuse.md); Linux only
+mount = ["dep:fuser", "dep:signal-hook", "dep:libc"]
 # real-dataset tests (T6, T7): need TRAJ_SLOW_SRC (a run directory) and TRAJ_SLOW_ADAPTER (its adapter TOML)
 slow = []
 
 [dev-dependencies]
 assert_cmd.workspace = true
+libc = "0.2"
+predicates = "3"
 tempfile.workspace = true
 walkdir.workspace = true
 sha2.workspace = true

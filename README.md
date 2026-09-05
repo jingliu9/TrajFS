@@ -67,8 +67,44 @@ traj -S stores/run-42.trajstore extract rounds/round-0037 /tmp/r37     # real fi
 traj -S stores/run-42.trajstore verify --deep
 ```
 
-Verbs: `init doctor pack watch ls tree find du stat cat extract edit grep sql derive verify commit skill hook bench`.
+Verbs: `init doctor pack watch ls tree find du stat cat extract edit grep sql derive verify commit skill hook bench mount umount`.
 `traj <verb> --help` documents each one.
+
+## Browsing in VS Code and other tools
+
+A store can be mounted as an ordinary read-only directory tree (FUSE, Linux; no root needed where `/dev/fuse` and
+`fusermount3` exist). VS Code, `grep -r`, `diff -r`, Python and every other tool then see normal files, served from
+the catalog and the packs with nothing extracted: a round of the 2.1 M-path reference run lists in 0.2 s the first
+time and in milliseconds after, a file opens in 2–3 ms, and a `diff -r` of a whole round against `traj extract` is
+clean in 10 s. New batches and new stores appear without remounting. Design and numbers: `docs/PLAN-fuse.md`.
+
+```
+traj mount ~/traj-mnt --daemon --save                 # every store under stores/, one directory per run; --save records
+                                                      # mount_root in trajfs.toml and writes the VS Code watcher exclude below
+code -r ~/traj-mnt                                    # or a run, or a round: VS Code settings are written for you
+traj -S stores/run-42.trajstore mount ~/mnt-42        # or one store, its tree at the mountpoint
+traj umount ~/traj-mnt
+```
+
+VS Code needs two settings for a mount, and `traj mount` writes them for you: the mount is excluded from the file
+watcher (which otherwise crawls every workspace folder to set inotify watches: minutes on a 2 M-path tree, and it
+exhausts `max_user_watches`), and its files are marked read-only so editors show a lock instead of a failed save.
+They go into VS Code's machine-level settings on the host on every mount (Remote-SSH: `~/.vscode-server/data/Machine/settings.json`),
+so opening the mountpoint itself or any folder under it is fine; `--save` and `traj init --mount-root` also put
+them into the repo's `.vscode/settings.json`, and `--no-vscode` skips all of it:
+
+```json
+{ "files.watcherExclude": { "/home/me/traj-mnt/**": true },
+  "files.readonlyInclude": { "/home/me/traj-mnt/**": true },
+  "search.followSymlinks": false }
+```
+
+Memory is a best-effort target (`--memory`, default 20 % of RAM): blobs and listings are evicted and inodes handed
+back to the kernel when the estimate is over it. The mount is read-only and the kernel enforces it (editors offer "Save As"); every read is sha-verified, so a
+corrupt pack shows up as an I/O error on that file, never as wrong bytes. The mountpoint must be outside every git
+work tree (`traj mount` refuses otherwise, and `traj doctor` lists live mounts). `getfattr -d <file>` shows the
+sha, the batch and the adapter attrs as `user.traj.*` xattrs. Ctrl+Shift+F is ripgrep over the mount: fine within a
+round, slow over a run, where `traj grep` and `traj sql` remain the tools.
 
 ## Setting up a repository
 
@@ -136,13 +172,16 @@ traj -S S sql "select path, json_extract_string(text(sha),'$.verdict') from file
 ## Testing
 
 ```
-cargo test --release                                            # 44 tests: format, round trips (proptest),
+cargo test --release                                            # 59 tests, ~15 s: format, round trips (proptest),
                                                                 # integrity, catalog verbs vs ls/find/du, grep vs grep,
-                                                                # events, SIGKILL recovery, watch, hook, skill examples
+                                                                # events, SIGKILL recovery, watch, hook, skill examples,
+                                                                # the FUSE mount (T10, skipped without /dev/fuse)
 TRAJ_SLOW_SRC=<run dir> TRAJ_SLOW_ADAPTER=<adapter.toml> \
   cargo test --release --features slow -p traj --test cli slow::   # a real round and a whole run, with size and latency bounds
+TRAJ_SLOW_STORE=<store dir> \
+  cargo test --release --features slow -p traj --test cli t10k     # the mount against a real store, with latency and RSS bounds
 cargo bench -p traj                                              # criterion latency of the hot verbs
-traj bench --store S --out review-bench/history/                 # regression baseline as JSON
+traj bench -S S --out review-bench/history/                 # regression baseline as JSON
 ```
 
 No shell or Python anywhere in the build, hooks or tests; external checks spawn `zstd`, `grep`, `ls`, `find`, `du`
@@ -153,12 +192,13 @@ and the DuckDB CLI directly.
 ```
 crates/trajfs-core       walk + rules, hashing, packs, Parquet catalog, manifest, store reader, ingest
 crates/trajfs-adapters   copilot-cli / claude-code / jsonl parsers; the TOML-declared adapter
-crates/traj              the CLI (hook, watch, skill export, bench included)
+crates/traj              the CLI (hook, watch, skill export, bench, the FUSE mount included)
 rules/                   built-in rule profiles
 skills/traj/SKILL.md     agent skill template, embedded in the binary
 docs/PLAN.md             design and test plan, with measured status (§14, §15)
 docs/idea-review.md      the evaluation that chose this design over tar+FUSE, with the benchmark
 docs/idea.md             the original notes
+docs/PLAN-fuse.md        the read-only FUSE mount: design, measurements (§16); docs/vscode-viewer.md records why a mount was chosen over an editor plugin
 review-bench/            the prototype scripts and numbers from the review (historical)
 ```
 

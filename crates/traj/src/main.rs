@@ -2,6 +2,8 @@
 
 mod cmd;
 mod config;
+#[cfg(all(feature = "mount", target_os = "linux"))]
+mod mount;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -64,6 +66,10 @@ enum Cmd {
     Hook(cmd::hook::HookArgs),
     /// Measure pack and verb timings; write the regression-baseline JSON
     Bench(cmd::bench::BenchArgs),
+    /// Mount a store (or every store under store_root) as a read-only directory tree (FUSE)
+    Mount(cmd::mount::MountArgs),
+    /// Unmount a `traj mount` (all of them when no mountpoint is given)
+    Umount(cmd::mount::UmountArgs),
 }
 
 fn main() {
@@ -114,7 +120,9 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Commit(a) => cmd::commit::run(a),
         Cmd::Skill(a) => cmd::skill::run(a),
         Cmd::Hook(a) => cmd::hook::run(a),
-        Cmd::Bench(a) => cmd::bench::run(a),
+        Cmd::Bench(a) => cmd::bench::run(&stores, a),
+        Cmd::Mount(a) => cmd::mount::run(&stores, a),
+        Cmd::Umount(a) => cmd::mount::umount(a),
     }
 }
 
@@ -149,5 +157,10 @@ pub(crate) fn norm(p: &str) -> String {
     while let Some(r) = s.strip_prefix("./") {
         s = r;
     }
-    s.trim_matches('/').to_string()
+    let s = s.trim_matches('/');
+    if s == "." {
+        String::new()
+    } else {
+        s.to_string()
+    }
 }

@@ -13,7 +13,7 @@ Both roots come from `trajfs.toml`; `traj doctor` shows them and checks the setu
 
 - Never `git add` anything under `{{data_root}}` or any `rounds/round-*/` tree. The pre-commit hook rejects it; the fix is `traj pack` + `traj commit`.
 - Never delete or move anything under `{{data_root}}` or a `.trajstore` unless the owner asked explicitly; drops are moves into a dated `dropped/` directory, never deletes.
-- Never use `--no-verify` in scripts. Never write back into a store; `traj edit` is a temp-copy viewer.
+- Never use `--no-verify` in scripts. Never write back into a store; `traj edit` is a temp-copy viewer and `traj mount` is read-only (the kernel enforces it).
 - Read from the store, not from the raw tree, whenever the store exists (`traj ls` answers in ms; `find` on the raw tree takes minutes).
 
 ## Procedures
@@ -44,15 +44,17 @@ traj grep -S <store> -e '<regex>' --name '*.stdout' -l
 traj du   -S <store> <dir> --depth 1
 ```
 
-Materialise for a person (VS Code, diff tools):
+Materialise for a person (VS Code, diff tools). A mount shows every store under `{{store_root}}` as a read-only tree, one directory per run, and writes the VS Code settings (watcher exclude, read-only) for it. `extract` makes a writable copy:
 ```
+traj mount <mountpoint outside every git work tree> --daemon --save   # first time; then: code -r <mountpoint>/<run-id>
+traj umount <mountpoint>
 traj extract -S <store> <dir-or-file> /tmp/<name>
 traj edit    -S <store> <path>
 ```
 
 Rebuild derived tables after an adapter upgrade, check a commit for raw paths in CI, or record a performance baseline:
 ```
-traj derive -S <store>            traj hook check-tree HEAD            traj bench --store <store> --out review-bench/history/
+traj derive -S <store>            traj hook check-tree HEAD            traj bench -S <store> --out review-bench/history/
 ```
 
 Analyse with SQL (DuckDB; views: `files`, `dirs`, `blobs`, `excluded`, `events` and other `derived/*` tables; functions `blob(sha)`, `text(sha)`; several `-S` register a `store` column):

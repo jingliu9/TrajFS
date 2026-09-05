@@ -30,7 +30,8 @@ pub enum Which {
 
 pub const VERBS: &[&str] = &[
     "init", "doctor", "pack", "watch", "ls", "tree", "find", "du", "stat", "cat", "extract",
-    "edit", "grep", "sql", "derive", "verify", "commit", "skill", "hook", "bench",
+    "edit", "grep", "sql", "derive", "verify", "commit", "skill", "hook", "bench", "mount",
+    "umount",
 ];
 
 pub fn render(cfg: Option<&Config>) -> String {
