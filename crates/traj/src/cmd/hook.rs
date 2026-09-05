@@ -51,6 +51,7 @@ pub fn run(a: HookArgs) -> Result<i32> {
 
 fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
     let out = Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -72,6 +73,7 @@ fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
 
 fn git_success(repo: &Path, args: &[&str]) -> Result<bool> {
     Ok(Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -109,6 +111,7 @@ fn parse_git_entries(bytes: &[u8]) -> Result<Vec<GitEntry>> {
 
 fn index_entries(repo: &Path, path: &str) -> Result<Vec<GitEntry>> {
     let out = Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(repo)
         .args(["ls-files", "--stage", "-z", "--", path])
@@ -620,7 +623,7 @@ pub fn check_tree(rev: &str) -> Result<i32> {
 
 /// Raw-run paths tracked in the index (used by `doctor`).
 pub fn tracked_raw_paths(repo: &Path) -> Result<Vec<String>> {
-    let Some(re) = raw_run_regex(Config::find_from(repo).as_ref())? else {
+    let Some(re) = raw_run_regex(Config::try_find_from(repo)?.as_ref())? else {
         return Ok(Vec::new());
     };
     let out = Command::new("git")
@@ -630,7 +633,10 @@ pub fn tracked_raw_paths(repo: &Path) -> Result<Vec<String>> {
         .output()
         .context("run git ls-files")?;
     if !out.status.success() {
-        return Ok(Vec::new());
+        bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .split('\0')

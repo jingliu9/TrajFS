@@ -52,6 +52,7 @@ pub struct Rules {
     pub file: RuleFile,
     keep: GlobSet,
     exclude: GlobSet,
+    excluded_subtrees: GlobSet,
 }
 
 /// Outcome for one path.
@@ -76,14 +77,34 @@ impl Rules {
             kb.add(Glob::new(g).with_context(|| format!("glob {g}"))?);
         }
         let mut eb = GlobSetBuilder::new();
+        let mut subtrees = GlobSetBuilder::new();
         for g in &file.always_exclude {
             eb.add(Glob::new(g).with_context(|| format!("glob {g}"))?);
+            if let Some(directory) = g.strip_suffix("/**") {
+                subtrees.add(Glob::new(directory).with_context(|| format!("glob {g}"))?);
+            }
         }
         Ok(Rules {
             file,
             keep: kb.build()?,
             exclude: eb.build()?,
+            excluded_subtrees: subtrees.build()?,
         })
+    }
+
+    /// A directory may be pruned only when no keep rule can override it.
+    pub fn prune_directory(&self, relative: &str) -> Option<&'static str> {
+        if self.excluded_subtrees.is_match(relative) {
+            return Some("always_exclude");
+        }
+        if self.file.always_keep.is_empty()
+            && relative
+                .split('/')
+                .any(|part| self.file.exclude_dirs.iter().any(|dir| dir == part))
+        {
+            return Some("exclude_dirs");
+        }
+        None
     }
 
     /// Resolve a profile by built-in name (`none`, `no-build-products`) or by path to a TOML file

@@ -45,6 +45,7 @@ pub fn run(a: InitArgs) -> Result<i32> {
     if !a.data_root.is_absolute() {
         bail!("--data-root must be an absolute path");
     }
+    validate_hook_install(&repo, a.force)?;
     trajfs_core::rules::Rules::resolve(&a.rules)?;
     std::fs::create_dir_all(&a.data_root)?;
     // adapter: given, scaffolded, or asked for (docs/PLAN.md §3.6: the adapter belongs to the target repo)
@@ -98,9 +99,9 @@ pub fn run(a: InitArgs) -> Result<i32> {
     cfg.save()?;
     let store_root = cfg.store_root();
     std::fs::create_dir_all(&store_root)?;
-    std::fs::write(store_root.join(".gitkeep"), "")?;
-    std::fs::write(
-        store_root.join(".gitattributes"),
+    create_if_missing(&store_root.join(".gitkeep"), "")?;
+    create_if_missing(
+        &store_root.join(".gitattributes"),
         "*.pack -diff -delta binary\n*.parquet -diff -delta binary\n",
     )?;
     let ignore = a.data_root.join(".gitignore");
@@ -137,14 +138,36 @@ pub fn run(a: InitArgs) -> Result<i32> {
     Ok(0)
 }
 
-pub fn hook_path(repo: &Path) -> PathBuf {
-    repo.join(".git").join("hooks").join("pre-commit")
+pub fn hook_path(repo: &Path) -> Result<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--git-path", "hooks/pre-commit"])
+        .output()
+        .context("resolve Git hook path")?;
+    if !out.status.success() {
+        bail!(
+            "cannot resolve Git hook path: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let text = String::from_utf8(out.stdout).context("Git hook path is not UTF-8")?;
+    let path = PathBuf::from(text.trim_end_matches('\n'));
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        repo.join(path)
+    })
 }
 
-pub fn install_hook(repo: &Path, force: bool) -> Result<()> {
-    let hook = hook_path(repo);
-    let me = std::env::current_exe()?;
-    if let Ok(md) = std::fs::symlink_metadata(&hook) {
+fn validate_hook_install(repo: &Path, force: bool) -> Result<PathBuf> {
+    let hook = hook_path(repo)?;
+    let metadata = match std::fs::symlink_metadata(&hook) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect existing Git hook"),
+    };
+    if let Some(md) = metadata {
         let is_ours = md.file_type().is_symlink()
             && std::fs::read_link(&hook)
                 .map(|t| t.file_name().map(|n| n == "traj").unwrap_or(false))
@@ -155,17 +178,41 @@ pub fn install_hook(repo: &Path, force: bool) -> Result<()> {
                 hook.display()
             );
         }
-        std::fs::remove_file(&hook)?;
     }
+    Ok(hook)
+}
+
+pub fn install_hook(repo: &Path, force: bool) -> Result<()> {
+    let hook = validate_hook_install(repo, force)?;
+    let me = std::env::current_exe()?;
     std::fs::create_dir_all(hook.parent().unwrap())?;
-    std::os::unix::fs::symlink(&me, &hook)
-        .with_context(|| format!("symlink {} -> {}", hook.display(), me.display()))?;
+    let temporary = hook.with_extension(format!("traj-{}.tmp", std::process::id()));
+    std::os::unix::fs::symlink(&me, &temporary)?;
+    if let Err(error) = std::fs::rename(&temporary, &hook) {
+        std::fs::remove_file(&temporary)?;
+        return Err(error).with_context(|| format!("install hook {}", hook.display()));
+    }
     Ok(())
+}
+
+fn create_if_missing(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(text.as_bytes())
+            .with_context(|| format!("write {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("create {}", path.display())),
+    }
 }
 
 pub fn doctor() -> Result<i32> {
     let mut problems = 0;
-    let Some(cfg) = Config::find() else {
+    let Some(cfg) = Config::try_find()? else {
         println!(
             "config:      none (no {CONFIG_NAME} above {}); run `traj init --data-root <abs dir>`",
             std::env::current_dir()?.display()
@@ -213,7 +260,7 @@ pub fn doctor() -> Result<i32> {
     if !cfg.data_root().is_dir() {
         problems += 1;
     }
-    let hook = hook_path(&cfg.dir);
+    let hook = hook_path(&cfg.dir)?;
     match std::fs::read_link(&hook) {
         Ok(t) if t.exists() => println!("hook:        {} -> {}", hook.display(), t.display()),
         Ok(t) => {

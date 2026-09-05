@@ -26,6 +26,7 @@ pub fn parse(bytes: &[u8]) -> Vec<Event> {
             out.push(unparsed(seq, line));
             return;
         };
+        let line = std::str::from_utf8(line).expect("parsed JSON is UTF-8");
         let ts = ["timestamp", "ts", "time", "created_at"]
             .iter()
             .find_map(|k| ts_us(v.get(*k)));

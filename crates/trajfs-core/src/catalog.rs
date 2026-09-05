@@ -8,7 +8,7 @@ use arrow::array::{
     Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, Int64Builder, MapBuilder,
     StringBuilder, UInt16Builder, UInt32Builder, UInt8Builder,
 };
-use arrow::datatypes::{Int32Type, Int64Type, Schema, UInt16Type, UInt32Type, UInt8Type};
+use arrow::datatypes::{DataType, Int32Type, Int64Type, Schema, UInt16Type, UInt32Type, UInt8Type};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
@@ -20,6 +20,103 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+fn require_columns(schema: &Schema, columns: &[(&str, DataType)]) -> Result<()> {
+    for (name, expected) in columns {
+        let field = schema
+            .field_with_name(name)
+            .with_context(|| format!("missing catalog column {name}"))?;
+        if field.data_type() != expected {
+            bail!(
+                "catalog column {name} has type {}, expected {expected}",
+                field.data_type()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn files_schema(schema: &Schema) -> Result<()> {
+    require_columns(
+        schema,
+        &[
+            ("path", DataType::Utf8),
+            ("dir", DataType::Utf8),
+            ("name", DataType::Utf8),
+            ("kind", DataType::UInt8),
+            ("mode", DataType::UInt16),
+            ("size", DataType::Int64),
+            ("sha", DataType::FixedSizeBinary(32)),
+            ("mtime_ns", DataType::Int64),
+            ("batch", DataType::UInt32),
+        ],
+    )?;
+    let attrs = schema
+        .field_with_name("attrs")
+        .context("missing catalog column attrs")?;
+    if let DataType::Map(entries, _) = attrs.data_type() {
+        if let DataType::Struct(fields) = entries.data_type() {
+            if fields.len() == 2 && fields.iter().all(|f| f.data_type() == &DataType::Utf8) {
+                return Ok(());
+            }
+        }
+    }
+    bail!("catalog column attrs must be a map of UTF-8 keys and values")
+}
+
+fn dirs_schema(schema: &Schema) -> Result<()> {
+    require_columns(
+        schema,
+        &[
+            ("dir", DataType::Utf8),
+            ("parent", DataType::Utf8),
+            ("name", DataType::Utf8),
+            ("depth", DataType::UInt16),
+            ("n_files", DataType::Int64),
+            ("n_dirs", DataType::Int64),
+            ("bytes", DataType::Int64),
+            ("batch", DataType::UInt32),
+        ],
+    )
+}
+
+fn index_schema(schema: &Schema) -> Result<()> {
+    require_columns(
+        schema,
+        &[
+            ("sha", DataType::FixedSizeBinary(32)),
+            ("pack", DataType::UInt32),
+            ("chunk_offset", DataType::Int64),
+            ("chunk_len", DataType::Int32),
+            ("offset", DataType::Int32),
+            ("size", DataType::Int64),
+            ("part", DataType::UInt16),
+        ],
+    )
+}
+
+fn require_non_null(batch: &RecordBatch) -> Result<()> {
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        if column.null_count() > 0 {
+            bail!("catalog column {} contains null values", field.name());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_catalog_path(path: &str, root_allowed: bool) -> Result<()> {
+    if root_allowed && path.is_empty() {
+        return Ok(());
+    }
+    if path.contains('\0')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        bail!("invalid relative catalog path {path:?}");
+    }
+    Ok(())
+}
 
 pub fn arrow_writer(path: &Path, schema: Arc<Schema>) -> Result<ArrowWriter<File>> {
     let props = WriterProperties::builder()
@@ -41,6 +138,17 @@ fn temp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub(crate) fn validate_segment_stem(stem: &str) -> Result<()> {
+    crate::manifest::validate_adapter_name(stem).context("invalid Parquet segment stem")
+}
+
+fn publish_segment(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::hard_link(source, destination)
+        .with_context(|| format!("publish immutable artifact {}", destination.display()))?;
+    std::fs::remove_file(source)?;
+    Ok(())
+}
+
 fn write_segment_attempt<T>(
     dir: &Path,
     stem: &str,
@@ -59,7 +167,10 @@ fn write_segment_attempt<T>(
     }
     let size = std::fs::metadata(&tmp)?.len();
     if size <= max_bytes {
-        std::fs::rename(&tmp, &final_path)?;
+        if let Err(error) = publish_segment(&tmp, &final_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
         out.push(final_path);
         *next_part += 1;
         return Ok(());
@@ -109,6 +220,7 @@ pub(crate) fn write_sized_segments<T>(
     first_part: usize,
     write_one: impl Fn(&Path, &[T]) -> Result<()>,
 ) -> Result<Vec<PathBuf>> {
+    validate_segment_stem(stem)?;
     if max_bytes == 0 {
         bail!("Parquet segment size limit must be greater than zero");
     }
@@ -169,7 +281,7 @@ pub(crate) fn write_sized_segments<T>(
 pub(crate) fn rename_single_segment(paths: &mut [PathBuf], dir: &Path, stem: &str) -> Result<()> {
     if paths.len() == 1 {
         let legacy = dir.join(format!("{stem}.parquet"));
-        std::fs::rename(&paths[0], &legacy)?;
+        publish_segment(&paths[0], &legacy)?;
         paths[0] = legacy;
     }
     Ok(())
@@ -317,7 +429,10 @@ fn prune(
     hi: &[u8],
 ) -> Vec<usize> {
     let schema = builder.parquet_schema();
-    let idx = schema.columns().iter().position(|c| c.name() == col);
+    let idx = schema
+        .columns()
+        .iter()
+        .position(|c| c.path().parts().len() == 1 && c.path().parts()[0] == col);
     let mut out = Vec::new();
     for (i, rg) in builder.metadata().row_groups().iter().enumerate() {
         let keep = match idx.and_then(|ci| rg.column(ci).statistics()) {
@@ -349,7 +464,10 @@ fn prune_direct(builder: &ParquetRecordBatchReaderBuilder<File>, dir: &str) -> V
         Some(rest[..i].to_vec())
     };
     let schema = builder.parquet_schema();
-    let idx = schema.columns().iter().position(|c| c.name() == "path");
+    let idx = schema
+        .columns()
+        .iter()
+        .position(|c| c.path().parts().len() == 1 && c.path().parts()[0] == "path");
     let mut out = Vec::new();
     let mut lo = prefix.clone();
     let mut hi = prefix.clone();
@@ -393,11 +511,14 @@ pub fn scan_direct_children(
 ) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    files_schema(builder.schema()).with_context(|| format!("catalog {}", segment.display()))?;
     let groups = prune_direct(&builder, dir);
     if groups.is_empty() {
         return Ok(());
     }
-    let mut cols = vec!["path", "kind", "mode", "size", "sha", "mtime_ns", "batch"];
+    let mut cols = vec![
+        "path", "dir", "name", "kind", "mode", "size", "sha", "mtime_ns", "batch",
+    ];
     if with_attrs {
         cols.push("attrs");
     }
@@ -409,7 +530,8 @@ pub fn scan_direct_children(
         .build()?;
     for batch in reader {
         let batch = batch?;
-        decode_rows(&batch, with_attrs, |p| crate::parent_of(p) == dir, &mut f);
+        decode_rows(&batch, with_attrs, |p| crate::parent_of(p) == dir, &mut f)
+            .with_context(|| format!("catalog {}", segment.display()))?;
     }
     Ok(())
 }
@@ -435,6 +557,7 @@ pub fn scan_files_filtered(
 ) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    files_schema(builder.schema()).with_context(|| format!("catalog {}", segment.display()))?;
     if let Some((lo, hi)) = range {
         let groups = prune(&builder, "path", lo, hi);
         if groups.is_empty() {
@@ -442,7 +565,9 @@ pub fn scan_files_filtered(
         }
         builder = builder.with_row_groups(groups);
     }
-    let mut cols = vec!["path", "kind", "mode", "size", "sha", "mtime_ns", "batch"];
+    let mut cols = vec![
+        "path", "dir", "name", "kind", "mode", "size", "sha", "mtime_ns", "batch",
+    ];
     if with_attrs {
         cols.push("attrs");
     }
@@ -462,7 +587,8 @@ pub fn scan_files_filtered(
             }
             pre(p)
         };
-        decode_rows(&batch, with_attrs, pre_range, &mut f);
+        decode_rows(&batch, with_attrs, pre_range, &mut f)
+            .with_context(|| format!("catalog {}", segment.display()))?;
     }
     Ok(())
 }
@@ -472,13 +598,16 @@ fn decode_rows(
     with_attrs: bool,
     pre: impl Fn(&str) -> bool,
     f: &mut impl FnMut(FileRow),
-) {
+) -> Result<()> {
+    require_non_null(batch)?;
     let by = |n: &str| {
         batch
             .column_by_name(n)
             .unwrap_or_else(|| panic!("column {n}"))
     };
     let path = by("path").as_string::<i32>();
+    let dir = by("dir").as_string::<i32>();
+    let name = by("name").as_string::<i32>();
     let kind = by("kind").as_primitive::<UInt8Type>();
     let mode = by("mode").as_primitive::<UInt16Type>();
     let size = by("size").as_primitive::<Int64Type>();
@@ -495,26 +624,49 @@ fn decode_rows(
         if !pre(p) {
             continue;
         }
+        validate_catalog_path(p, false)?;
+        if dir.value(i) != crate::parent_of(p) || name.value(i) != crate::basename_of(p) {
+            bail!("{p}: catalog parent or basename does not match the path");
+        }
+        let kind = Kind::from_u8(kind.value(i))
+            .with_context(|| format!("{p}: invalid catalog file kind {}", kind.value(i)))?;
+        let hash: Sha = sha
+            .value(i)
+            .try_into()
+            .context("invalid catalog SHA width")?;
+        if size.value(i) < 0 {
+            bail!("{p}: negative catalog file size");
+        }
+        if mode.value(i) & !0o777 != 0 {
+            bail!("{p}: catalog mode contains special permission or file-type bits");
+        }
+        if kind == Kind::Empty && (size.value(i) != 0 || hash != crate::hash::sha_of_bytes(b"")) {
+            bail!("{p}: empty file has a nonempty size or content hash");
+        }
         let mut a = Vec::new();
         if let Some(m) = attrs {
             let entries = m.value(i);
             let ks = entries.column(0).as_string::<i32>();
             let vs = entries.column(1).as_string::<i32>();
+            if ks.null_count() > 0 || vs.null_count() > 0 {
+                bail!("{p}: catalog attrs contain null keys or values");
+            }
             for j in 0..entries.len() {
                 a.push((ks.value(j).to_string(), vs.value(j).to_string()));
             }
         }
         f(FileRow {
             path: p.to_string(),
-            kind: Kind::from_u8(kind.value(i)).unwrap_or(Kind::File),
+            kind,
             mode: mode.value(i),
             size: size.value(i),
-            sha: sha.value(i).try_into().unwrap(),
+            sha: hash,
             mtime_ns: mtime.value(i),
             batch: bt.value(i),
             attrs: a,
         });
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- dirs
@@ -540,40 +692,60 @@ impl DirRow {
 
 /// Aggregate directory rows for a batch from its file rows (every ancestor, including the root `""`).
 pub fn dirs_from_files<'a>(rows: impl Iterator<Item = &'a FileRow>, batch: u32) -> Vec<DirRow> {
-    let mut m: BTreeMap<String, DirRow> = BTreeMap::new();
-    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dirs = DirAccumulator::new(batch);
     for r in rows {
+        dirs.push(r);
+    }
+    dirs.into_rows().into_values().collect()
+}
+
+pub(crate) struct DirAccumulator {
+    batch: u32,
+    rows: BTreeMap<String, DirRow>,
+    seen_dirs: std::collections::HashSet<String>,
+}
+
+impl DirAccumulator {
+    pub(crate) fn new(batch: u32) -> Self {
+        Self {
+            batch,
+            rows: BTreeMap::new(),
+            seen_dirs: std::collections::HashSet::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, r: &FileRow) {
         let dir = r.dir().to_string();
         // count this file in its own dir and bytes in every ancestor
         let mut cur = dir.clone();
         loop {
-            let e = m.entry(cur.clone()).or_insert_with(|| DirRow {
+            let e = self.rows.entry(cur.clone()).or_insert_with(|| DirRow {
                 dir: cur.clone(),
                 depth: if cur.is_empty() {
                     0
                 } else {
                     cur.matches('/').count() as u16 + 1
                 },
-                batch,
+                batch: self.batch,
                 ..Default::default()
             });
             // n_files and bytes are recursive (everything below the directory); n_dirs is direct children
             e.n_files += 1;
-            e.bytes += r.size;
+            e.bytes = e.bytes.saturating_add(r.size);
             if cur.is_empty() {
                 break;
             }
             let parent = crate::parent_of(&cur).to_string();
             // register cur as a subdir of parent once
-            if seen_dirs.insert(cur.clone()) {
-                let pe = m.entry(parent.clone()).or_insert_with(|| DirRow {
+            if self.seen_dirs.insert(cur.clone()) {
+                let pe = self.rows.entry(parent.clone()).or_insert_with(|| DirRow {
                     dir: parent.clone(),
                     depth: if parent.is_empty() {
                         0
                     } else {
                         parent.matches('/').count() as u16 + 1
                     },
-                    batch,
+                    batch: self.batch,
                     ..Default::default()
                 });
                 pe.n_dirs += 1;
@@ -581,7 +753,10 @@ pub fn dirs_from_files<'a>(rows: impl Iterator<Item = &'a FileRow>, batch: u32) 
             cur = parent;
         }
     }
-    m.into_values().collect()
+
+    pub(crate) fn into_rows(self) -> BTreeMap<String, DirRow> {
+        self.rows
+    }
 }
 
 pub fn write_dirs(path: &Path, rows: &[DirRow]) -> Result<()> {
@@ -627,6 +802,7 @@ pub fn scan_dirs(
 ) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    dirs_schema(builder.schema()).with_context(|| format!("catalog {}", segment.display()))?;
     if let Some((lo, hi)) = range {
         let groups = prune(&builder, "dir", lo, hi);
         if groups.is_empty() {
@@ -637,12 +813,15 @@ pub fn scan_dirs(
     let reader = builder.with_batch_size(ROW_GROUP).build()?;
     for batch in reader {
         let batch = batch?;
+        require_non_null(&batch)?;
         let by = |n: &str| {
             batch
                 .column_by_name(n)
                 .unwrap_or_else(|| panic!("column {n}"))
         };
         let dir = by("dir").as_string::<i32>();
+        let parent = by("parent").as_string::<i32>();
+        let name = by("name").as_string::<i32>();
         let depth = by("depth").as_primitive::<UInt16Type>();
         let nf = by("n_files").as_primitive::<Int64Type>();
         let nd = by("n_dirs").as_primitive::<Int64Type>();
@@ -655,6 +834,21 @@ pub fn scan_dirs(
                 if db < lo || db >= hi {
                     continue;
                 }
+            }
+            validate_catalog_path(d, true)?;
+            let expected_depth = if d.is_empty() {
+                0
+            } else {
+                d.split('/').count()
+            };
+            if depth.value(i) as usize != expected_depth
+                || parent.value(i) != crate::parent_of(d)
+                || name.value(i) != crate::basename_of(d)
+                || nf.value(i) < 0
+                || nd.value(i) < 0
+                || bytes.value(i) < 0
+            {
+                bail!("{d}: invalid catalog directory metadata");
             }
             f(DirRow {
                 dir: d.to_string(),
@@ -836,11 +1030,12 @@ pub fn write_batch_segments(
 
 pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
     let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-        .with_batch_size(ROW_GROUP)
-        .build()?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    index_schema(builder.schema()).with_context(|| format!("index {}", segment.display()))?;
+    let reader = builder.with_batch_size(ROW_GROUP).build()?;
     for batch in reader {
         let batch = batch?;
+        require_non_null(&batch)?;
         let by = |n: &str| {
             batch
                 .column_by_name(n)
@@ -854,8 +1049,24 @@ pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
         let size = by("size").as_primitive::<Int64Type>();
         let part = by("part").as_primitive::<UInt16Type>();
         for i in 0..batch.num_rows() {
+            let max_frame = (crate::CHUNK_BYTES * 2 + 1024) as i64;
+            if pack.value(i) == 0
+                || co.value(i) < crate::pack::MAGIC.len() as i64
+                || cl.value(i) <= 0
+                || cl.value(i) as i64 > max_frame
+                || off.value(i) < 0
+                || size.value(i) < 0
+                || (off.value(i) as i64)
+                    .checked_add(size.value(i))
+                    .is_none_or(|end| end > max_frame)
+            {
+                bail!(
+                    "index {}: invalid blob location at row {i}",
+                    segment.display()
+                );
+            }
             f(
-                sha.value(i).try_into().unwrap(),
+                sha.value(i).try_into().context("invalid index SHA width")?,
                 Loc {
                     pack: pack.value(i),
                     chunk_offset: co.value(i),
@@ -865,6 +1076,36 @@ pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
                     part: part.value(i),
                 },
             );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_excluded(segment: &Path, deep: bool) -> Result<()> {
+    let file = File::open(segment)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    require_columns(
+        builder.schema(),
+        &[
+            ("path", DataType::Utf8),
+            ("size", DataType::Int64),
+            ("rule", DataType::Utf8),
+            ("batch", DataType::UInt32),
+        ],
+    )?;
+    if deep {
+        for batch in builder.with_batch_size(ROW_GROUP).build()? {
+            require_non_null(&batch?)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_parquet(segment: &Path, deep: bool) -> Result<()> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(segment)?)?;
+    if deep {
+        for batch in builder.with_batch_size(ROW_GROUP).build()? {
+            batch?;
         }
     }
     Ok(())

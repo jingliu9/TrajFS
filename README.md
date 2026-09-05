@@ -39,6 +39,10 @@ derived/<adapter>/events-rebuild-GGGG[-PPPP].parquet   transactional full rebuil
   no-follow temporary file that is flushed and synced before rename.
 - **Content-addressed.** A path maps to a sha256; a sha256 maps to bytes in a pack. Duplicate content is stored once,
   across rounds and across the runner's own snapshot copies.
+- **Consistent live prefixes.** Each regular file is bound to its captured inode and length. Hashing, packing,
+  and derived events use that same prefix; later appends are left for the next batch. Replacement, truncation,
+  or a changed prefix aborts publication rather than producing mismatched sizes/hashes. This is a per-file
+  checkpoint, not an atomic snapshot of a whole actively changing tree.
 - **Packs, not Parquet, for bytes.** Reading one file is a `pread` of one frame plus a decompress of at most 1 MiB,
   a few microseconds to a few milliseconds. Parquet holds only the catalog and the derived tables.
 - **Append-only batches.** Each `traj pack` adds one batch: new paths, only the blobs not seen before, and its own
@@ -124,6 +128,14 @@ not complete, readable TrajFS stores. It prints the `traj pack` / `traj commit` 
 allowed, so an existing repository can migrate. Policy and file sizes are read from the staged Git objects, not from
 potentially different working-tree contents.
 
+`traj commit` commits only its selected store and leaves unrelated staged and unstaged work intact.
+`traj init` honors Git's hook location, including linked worktrees and `core.hooksPath`, and does not overwrite
+an existing store-root attributes file. Malformed, unreadable, or missing explicitly selected configuration is an
+error, not permission to fall back to different roots or retention rules. A watcher stops without committing when
+packing returns an error.
+Manual packing and watching use the same encoded data-root-relative store IDs for nested runs, so two tasks with
+the same run-directory basename do not collide. An explicit `--out` or `--id` still takes precedence.
+
 Then, per run or continuously:
 
 ```
@@ -163,6 +175,14 @@ terminal `init` asks whether to do so. The exported skill explains the file to a
 `traj sql` opens an embedded DuckDB over the store's Parquet files: views `files`, `dirs`, `excluded`, `blobs` (the
 pack index) and `events` (when derived), plus `text(sha)` and `blob(sha)` to reach content from a query. Several
 `-S` stores register together with a `store` column. The Parquet files are plain and readable by any other tool.
+Content functions resolve hashes across all registered stores and verify returned bytes. An unknown or malformed
+hash returns NULL; corrupted or unreadable stored content raises an error instead. Each SQL connection owns its
+store bindings and releases their locks when it closes.
+
+These SQL views expose the published batch history, including older versions of a path. Filesystem-style
+`stat`, browse, extract, grep, and mount operations instead resolve the latest compatible file/directory namespace.
+Adapter partial records preserve invalid UTF-8 as a JSON `bytes` array, rather than irreversibly replacing bytes.
+The outer trajectory blob remains the authoritative original stream.
 
 ```
 traj -S S sql "select tool_name, count(*) from events where type='tool.execution_complete' group by 1 order by 2 desc"

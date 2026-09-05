@@ -3,6 +3,7 @@
 //! session-state lines without ids.
 
 use crate::util::{lines, str_of, ts_us, unparsed};
+use std::collections::HashMap;
 use trajfs_core::events::Event;
 use trajfs_core::Adapter;
 
@@ -10,11 +11,13 @@ pub struct ClaudeCode;
 
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
+    let mut tool_names = HashMap::new();
     lines(bytes, |seq, v, line| {
         let Some(v) = v else {
             out.push(unparsed(seq, line));
             return;
         };
+        let line = std::str::from_utf8(line).expect("parsed JSON is UTF-8");
         let ty = str_of(&v, &["type"]).unwrap_or_else(|| "_untyped".into());
         let msg = v.get("message");
         let actor = msg
@@ -29,9 +32,21 @@ pub fn parse(bytes: &[u8]) -> Vec<Event> {
             .and_then(|c| c.as_array())
         {
             for block in content {
-                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    tool_name = str_of(block, &["name"]);
-                    break;
+                let name = match block.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_use") => {
+                        let name = str_of(block, &["name"]);
+                        if let (Some(id), Some(name)) = (str_of(block, &["id"]), &name) {
+                            tool_names.insert(id, name.clone());
+                        }
+                        name
+                    }
+                    Some("tool_result") => {
+                        str_of(block, &["tool_use_id"]).and_then(|id| tool_names.get(&id).cloned())
+                    }
+                    _ => None,
+                };
+                if tool_name.is_none() {
+                    tool_name = name;
                 }
             }
         }
@@ -59,5 +74,22 @@ impl Adapter for ClaudeCode {
     }
     fn parse_events(&self, _path: &str, bytes: &[u8]) -> Vec<Event> {
         parse(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_results_resolve_names_by_call_id_and_keep_parent_ids() {
+        let events = parse(
+            br#"{"type":"assistant","uuid":"a","message":{"role":"assistant","content":[{"type":"tool_use","id":"first","name":"First"},{"type":"tool_use","id":"second","name":"Second"}]}}
+{"type":"user","uuid":"u","parentUuid":"a","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"second","content":"synthetic"}]}}"#,
+        );
+        assert_eq!(events[0].tool_name.as_deref(), Some("First"));
+        assert_eq!(events[1].parent_id.as_deref(), Some("a"));
+        assert_eq!(events[1].tool_name.as_deref(), Some("Second"));
+        assert_eq!(events[1].actor.as_deref(), Some("user"));
     }
 }

@@ -75,37 +75,58 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn find_from(start: &Path) -> Option<Config> {
-        let mut cur = Some(start.to_path_buf());
-        while let Some(d) = cur {
-            let p = d.join(CONFIG_NAME);
-            if p.is_file() {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if let Ok(file) = toml::from_str::<ConfigFile>(&text) {
-                        return Some(Config { file, dir: d });
-                    }
+    pub fn try_find_from(start: &Path) -> Result<Option<Config>> {
+        let start = if start.is_absolute() {
+            start.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(start)
+        };
+        let mut cur = Some(start);
+        while let Some(dir) = cur {
+            let path = dir.join(CONFIG_NAME);
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => return Self::load_path(&path).map(Some),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("inspect {}", path.display()))
                 }
             }
-            cur = d.parent().map(|p| p.to_path_buf());
+            cur = dir.parent().map(Path::to_path_buf);
         }
-        None
+        Ok(None)
     }
 
-    pub fn find() -> Option<Config> {
-        if let Ok(p) = std::env::var("TRAJ_CONFIG") {
-            let p = PathBuf::from(p);
-            let text = std::fs::read_to_string(&p).ok()?;
-            let file = toml::from_str::<ConfigFile>(&text).ok()?;
-            return Some(Config {
-                file,
-                dir: p.parent()?.to_path_buf(),
-            });
+    pub fn try_find() -> Result<Option<Config>> {
+        match std::env::var_os("TRAJ_CONFIG") {
+            Some(path) => Self::load_path(&PathBuf::from(path)).map(Some),
+            None => Self::try_find_from(&std::env::current_dir()?),
         }
-        Self::find_from(&std::env::current_dir().ok()?)
+    }
+
+    fn load_path(path: &Path) -> Result<Config> {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("read configuration {}", path.display()))?;
+        let file: ConfigFile = toml::from_str(&text)
+            .with_context(|| format!("parse configuration {}", path.display()))?;
+        if !file.data_root.is_absolute() {
+            bail!("data_root in {} must be absolute", path.display());
+        }
+        Ok(Config {
+            file,
+            dir: path
+                .parent()
+                .context("configuration has no parent")?
+                .to_path_buf(),
+        })
     }
 
     pub fn require() -> Result<Config> {
-        Self::find().context("no trajfs.toml found above the current directory (run `traj init` in the repo, or set TRAJ_CONFIG)")
+        Self::try_find()?.context("no trajfs.toml found above the current directory (run `traj init` in the repo, or set TRAJ_CONFIG)")
     }
 
     pub fn data_root(&self) -> PathBuf {

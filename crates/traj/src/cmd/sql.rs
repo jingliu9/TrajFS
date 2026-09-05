@@ -1,8 +1,9 @@
 //! `traj sql`: DuckDB over the store's Parquet files (docs/PLAN.md §5).
 
 use crate::config::{resolve_store, Config};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Args;
+use std::sync::Arc;
 
 #[derive(Args, Debug)]
 pub struct SqlArgs {
@@ -18,17 +19,34 @@ pub struct SqlArgs {
 
 pub struct StoreTables {
     pub name: String,
-    pub root: std::path::PathBuf,
     pub files: Vec<std::path::PathBuf>,
     pub dirs: Vec<std::path::PathBuf>,
     pub excluded: Vec<std::path::PathBuf>,
     pub indexes: Vec<std::path::PathBuf>,
     pub events: Vec<std::path::PathBuf>,
-    _store: trajfs_core::Store,
+    store: Arc<trajfs_core::Store>,
 }
 
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn sql_path(path: &std::path::Path) -> Result<String> {
+    let path = path.to_str().context("SQL artifact paths must be UTF-8")?;
+    if cfg!(unix) && path.contains('\\') && path.contains(['*', '?', '[']) {
+        bail!("DuckDB cannot read a literal path containing both a backslash and glob characters");
+    }
+    // read_parquet treats even explicitly listed filenames as globs.
+    let mut literal = String::new();
+    for c in path.chars() {
+        match c {
+            '*' => literal.push_str("[*]"),
+            '?' => literal.push_str("[?]"),
+            '[' => literal.push_str("[[]"),
+            _ => literal.push(c),
+        }
+    }
+    Ok(sql_string(&literal))
 }
 
 fn add_view(
@@ -36,26 +54,24 @@ fn add_view(
     stores: &[StoreTables],
     table: &str,
     paths: impl Fn(&StoreTables) -> &[std::path::PathBuf],
-) {
-    let parts: Vec<String> = stores
-        .iter()
-        .filter_map(|store| {
-            let files = paths(store);
-            if files.is_empty() {
-                return None;
-            }
-            let files = files
-                .iter()
-                .map(|path| sql_string(&path.display().to_string()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Some(format!(
-                "select {} as store, * from read_parquet([{}], union_by_name=true)",
-                sql_string(&store.name),
-                files
-            ))
-        })
-        .collect();
+) -> Result<()> {
+    let mut parts = Vec::new();
+    for store in stores {
+        let files = paths(store);
+        if files.is_empty() {
+            continue;
+        }
+        let files = files
+            .iter()
+            .map(|path| sql_path(path))
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        parts.push(format!(
+            "select {} as store, * from read_parquet([{}], union_by_name=true, hive_partitioning=false)",
+            sql_string(&store.name),
+            files
+        ));
+    }
     if !parts.is_empty() {
         out.push((
             table.to_string(),
@@ -65,27 +81,28 @@ fn add_view(
             ),
         ));
     }
+    Ok(())
 }
 
-pub fn view_sql(stores: &[StoreTables]) -> Vec<(String, String)> {
+pub fn view_sql(stores: &[StoreTables]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
-    add_view(&mut out, stores, "files", |store| &store.files);
-    add_view(&mut out, stores, "dirs", |store| &store.dirs);
-    add_view(&mut out, stores, "excluded", |store| &store.excluded);
-    add_view(&mut out, stores, "blobs", |store| &store.indexes);
-    add_view(&mut out, stores, "events", |store| &store.events);
-    out
+    add_view(&mut out, stores, "files", |store| &store.files)?;
+    add_view(&mut out, stores, "dirs", |store| &store.dirs)?;
+    add_view(&mut out, stores, "excluded", |store| &store.excluded)?;
+    add_view(&mut out, stores, "blobs", |store| &store.indexes)?;
+    add_view(&mut out, stores, "events", |store| &store.events)?;
+    Ok(out)
 }
 
 pub fn tables_for(stores: &[String]) -> Result<Vec<StoreTables>> {
-    let cfg = Config::find();
+    let cfg = Config::try_find()?;
     if stores.is_empty() {
         bail!("no store given: pass -S <store> (repeatable)");
     }
     let mut v = Vec::new();
     for s in stores {
         let root = resolve_store(s, cfg.as_ref())?.canonicalize()?;
-        let store = trajfs_core::Store::open(&root)?;
+        let store = Arc::new(trajfs_core::Store::open(&root)?);
         let files = store.files_segments().to_vec();
         let dirs = store.dirs_segments().to_vec();
         let excluded = store.excluded_segments().to_vec();
@@ -101,13 +118,12 @@ pub fn tables_for(stores: &[String]) -> Result<Vec<StoreTables>> {
             .collect();
         v.push(StoreTables {
             name: store.manifest.store_id.clone(),
-            root: root.clone(),
             files,
             dirs,
             excluded,
             indexes,
             events,
-            _store: store,
+            store,
         });
     }
     Ok(v)
@@ -117,7 +133,7 @@ pub fn tables_for(stores: &[String]) -> Result<Vec<StoreTables>> {
 pub fn run(stores: &[String], a: SqlArgs) -> Result<i32> {
     use std::io::Read;
     let tables = tables_for(stores)?;
-    let views = view_sql(&tables);
+    let views = view_sql(&tables)?;
     if a.show_views {
         for (_, v) in &views {
             println!("{v};");
@@ -135,12 +151,16 @@ pub fn run(stores: &[String], a: SqlArgs) -> Result<i32> {
     for (_, v) in &views {
         conn.execute_batch(v)?;
     }
-    // blob(sha) / text(sha): bytes of a blob by sha (BLOB or hex VARCHAR), looked up in the first store
-    udf::install(&conn, &tables[0].root)?;
+    udf::install(
+        &conn,
+        tables.iter().map(|table| table.store.clone()).collect(),
+    )?;
     let mut stmt = conn.prepare(&query)?;
-    let batches: Vec<duckdb::arrow::array::RecordBatch> = stmt.query_arrow([])?.collect();
+    let result = stmt.query_arrow([])?;
+    let schema = result.get_schema();
+    let batches: Vec<duckdb::arrow::array::RecordBatch> = result.collect();
     if a.csv {
-        print_csv(&batches)?;
+        print_csv(&schema, &batches)?;
     } else if batches.is_empty() {
         println!("(no rows)");
     } else {
@@ -158,24 +178,22 @@ pub fn run(_stores: &[String], _a: SqlArgs) -> Result<i32> {
 }
 
 #[cfg(feature = "sql")]
-fn print_csv(batches: &[duckdb::arrow::array::RecordBatch]) -> Result<()> {
+fn print_csv(
+    schema: &duckdb::arrow::datatypes::Schema,
+    batches: &[duckdb::arrow::array::RecordBatch],
+) -> Result<()> {
     use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let opts = FormatOptions::default().with_null("");
-    let mut header_done = false;
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|field| csv_quote(field.name()))
+        .collect();
+    writeln!(out, "{}", names.join(","))?;
     for b in batches {
-        if !header_done {
-            let names: Vec<String> = b
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| csv_quote(f.name()))
-                .collect();
-            writeln!(out, "{}", names.join(","))?;
-            header_done = true;
-        }
         let fmts: Vec<ArrayFormatter> = b
             .columns()
             .iter()
@@ -194,7 +212,7 @@ fn print_csv(batches: &[duckdb::arrow::array::RecordBatch]) -> Result<()> {
 
 #[cfg(feature = "sql")]
 fn csv_quote(s: &str) -> String {
-    if s.contains([',', '"', '\n']) {
+    if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -203,26 +221,20 @@ fn csv_quote(s: &str) -> String {
 
 #[cfg(feature = "sql")]
 mod udf {
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use duckdb::arrow::array::{
         Array, BinaryArray, BinaryBuilder, FixedSizeBinaryArray, LargeBinaryArray,
         LargeStringArray, RecordBatch, StringArray, StringBuilder,
     };
     use duckdb::arrow::datatypes::DataType;
     use duckdb::vscalar::arrow::{ArrowFunctionSignature, VArrowScalar};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use trajfs_core::Store;
 
-    static STORE: OnceLock<Arc<Store>> = OnceLock::new();
-
-    fn store() -> Arc<Store> {
-        STORE.get().expect("udf store").clone()
-    }
-
     /// Bytes for every input row (None when the sha is unknown or malformed).
-    fn resolve(input: &RecordBatch) -> Vec<Option<Vec<u8>>> {
-        let st = store();
-        let mut reader = st.reader();
+    fn resolve(stores: &[Arc<Store>], input: &RecordBatch) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut readers: Vec<_> = stores.iter().map(|store| store.reader()).collect();
+        let empty_sha = trajfs_core::hash::sha_of_bytes(b"");
         let col = input.column(0);
         let n = col.len();
         let mut out = Vec::with_capacity(n);
@@ -246,21 +258,42 @@ mod udf {
             bytes.as_slice().try_into().ok()
         };
         for i in 0..n {
-            let v = sha_at(i).and_then(|sha| st.read_sha(&mut reader, &sha).ok());
-            out.push(v);
+            let Some(sha) = sha_at(i) else {
+                out.push(None);
+                continue;
+            };
+            // Empty files have a content hash but no pack-index entry.
+            if sha == empty_sha {
+                out.push(Some(Vec::new()));
+                continue;
+            }
+            let mut bytes = None;
+            for (store, reader) in stores.iter().zip(&mut readers) {
+                if store.index()?.contains_key(&sha) {
+                    bytes = Some(store.read_blob(reader, &sha, true).with_context(|| {
+                        format!(
+                            "read blob {} from store {}",
+                            hex::encode(sha),
+                            store.root.display()
+                        )
+                    })?);
+                    break;
+                }
+            }
+            out.push(bytes);
         }
-        out
+        Ok(out)
     }
 
     pub struct Text;
     impl VArrowScalar for Text {
-        type State = ();
+        type State = Vec<Arc<Store>>;
         fn invoke(
-            _: &(),
+            stores: &Self::State,
             input: RecordBatch,
         ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
             let mut b = StringBuilder::new();
-            for v in resolve(&input) {
+            for v in resolve(stores, &input)? {
                 match v {
                     Some(bytes) => b.append_value(String::from_utf8_lossy(&bytes)),
                     None => b.append_null(),
@@ -278,13 +311,13 @@ mod udf {
 
     pub struct Blob;
     impl VArrowScalar for Blob {
-        type State = ();
+        type State = Vec<Arc<Store>>;
         fn invoke(
-            _: &(),
+            stores: &Self::State,
             input: RecordBatch,
         ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
             let mut b = BinaryBuilder::new();
-            for v in resolve(&input) {
+            for v in resolve(stores, &input)? {
                 match v {
                     Some(bytes) => b.append_value(bytes),
                     None => b.append_null(),
@@ -300,15 +333,71 @@ mod udf {
         }
     }
 
-    static INSTALL_LOCK: Mutex<()> = Mutex::new(());
-
-    pub fn install(conn: &duckdb::Connection, root: &std::path::Path) -> Result<()> {
-        let _g = INSTALL_LOCK.lock().unwrap();
-        if STORE.get().is_none() {
-            let _ = STORE.set(Arc::new(Store::open(root)?));
-        }
-        conn.register_scalar_function::<Text>("text")?;
-        conn.register_scalar_function::<Blob>("blob")?;
+    pub fn install(conn: &duckdb::Connection, stores: Vec<Arc<Store>>) -> Result<()> {
+        conn.register_scalar_function_with_state::<Text>("text", &stores)?;
+        conn.register_scalar_function_with_state::<Blob>("blob", &stores)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use trajfs_core::ingest::{ingest, IngestOptions};
+        use trajfs_core::rules::Rules;
+
+        fn store(root: &std::path::Path, name: &str, bytes: &[u8]) -> Arc<Store> {
+            let source = root.join(format!("{name}-source"));
+            let destination = root.join(name);
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("content"), bytes).unwrap();
+            ingest(
+                &source,
+                &destination,
+                IngestOptions {
+                    rules: Rules::from_toml("name = 'none'").unwrap(),
+                    rules_name: "none".into(),
+                    adapter: &trajfs_core::NoAdapter,
+                    label: "fixture".into(),
+                    jobs: 2,
+                    derive: false,
+                    store_id: None,
+                },
+            )
+            .unwrap();
+            Arc::new(Store::open(&destination).unwrap())
+        }
+
+        fn text(conn: &duckdb::Connection, bytes: &[u8]) -> Option<String> {
+            conn.query_row(
+                "select text(?)",
+                [hex::encode(trajfs_core::hash::sha_of_bytes(bytes))],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn sql_udfs_are_connection_scoped_and_release_store_locks() {
+            let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let left = store(root.path(), "left", b"left");
+            let weak_left = Arc::downgrade(&left);
+            let right = store(root.path(), "right", b"right");
+            let weak_right = Arc::downgrade(&right);
+            let a = duckdb::Connection::open_in_memory().unwrap();
+            install(&a, vec![left]).unwrap();
+            let b = duckdb::Connection::open_in_memory().unwrap();
+            install(&b, vec![right]).unwrap();
+            assert_eq!(text(&a, b"left").as_deref(), Some("left"));
+            assert_eq!(text(&b, b"right").as_deref(), Some("right"));
+            assert_eq!(text(&a, b"right"), None);
+            assert_eq!(text(&b, b"left"), None);
+            assert!(trajfs_core::store::lock_store_exclusive(&root.path().join("left")).is_err());
+            drop(a);
+            assert!(weak_left.upgrade().is_none());
+            assert!(trajfs_core::store::lock_store_exclusive(&root.path().join("left")).is_ok());
+            assert_eq!(text(&b, b"right").as_deref(), Some("right"));
+            drop(b);
+            assert!(weak_right.upgrade().is_none());
+        }
     }
 }

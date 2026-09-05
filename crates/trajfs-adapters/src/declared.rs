@@ -29,6 +29,7 @@ fn one() -> u16 {
 #[derive(Deserialize, Debug, Default)]
 pub struct AttrRule {
     /// Regex on the store path; named capture groups become attribute keys.
+    /// Later matching rules replace earlier values with the same key.
     pub pattern: String,
     #[serde(default)]
     pub strip_leading_zeros: Vec<String>,
@@ -146,7 +147,7 @@ impl Adapter for Declared {
         self.file.version
     }
     fn attrs(&self, path: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
+        let mut out: Vec<(String, String)> = Vec::new();
         for (re, strip) in &self.attrs {
             if let Some(c) = re.captures(path) {
                 for name in re.capture_names().flatten() {
@@ -158,7 +159,11 @@ impl Adapter for Declared {
                                 v = "0";
                             }
                         }
-                        out.push((name.to_string(), v.to_string()));
+                        if let Some((_, value)) = out.iter_mut().find(|(key, _)| key == name) {
+                            *value = v.to_string();
+                        } else {
+                            out.push((name.to_string(), v.to_string()));
+                        }
                     }
                 }
             }
@@ -194,23 +199,25 @@ impl Adapter for Declared {
         self.file.batch_ready.as_ref().map(|b| b.run_glob.clone())
     }
     fn batch_ready(&self, src: &Path, already: &[String]) -> Option<String> {
-        let markers = self.markers.as_ref()?;
+        match self.try_batch_ready(src, already) {
+            Ok(label) => label,
+            Err(error) => {
+                eprintln!("adapter readiness failed: {error:#}");
+                None
+            }
+        }
+    }
+    fn try_batch_ready(&self, src: &Path, already: &[String]) -> Result<Option<String>> {
+        let Some(markers) = self.markers.as_ref() else {
+            return Ok(None);
+        };
         let mut labels: Vec<String> = Vec::new();
-        for e in walkdir::WalkDir::new(src)
-            .min_depth(1)
-            .max_depth(6)
-            .into_iter()
-            .flatten()
-        {
+        for e in walkdir::WalkDir::new(src).min_depth(1).into_iter() {
+            let e = e.with_context(|| format!("inspect readiness under {}", src.display()))?;
             if !e.file_type().is_file() {
                 continue;
             }
-            let rel = e
-                .path()
-                .strip_prefix(src)
-                .ok()?
-                .to_string_lossy()
-                .to_string();
+            let rel = e.path().strip_prefix(src)?.to_string_lossy().to_string();
             if markers.is_match(&rel) {
                 let label = self
                     .label_ancestor
@@ -237,7 +244,7 @@ impl Adapter for Declared {
             }
         }
         labels.sort();
-        labels.into_iter().rev().find(|l| !already.contains(l))
+        Ok(labels.into_iter().rev().find(|l| !already.contains(l)))
     }
     fn raw_patterns(&self) -> Vec<String> {
         self.file

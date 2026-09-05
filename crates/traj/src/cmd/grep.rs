@@ -52,6 +52,7 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
         .transpose()?
         .map(|g| g.compile_matcher());
     let dir = norm(&a.path);
+    super::browse::require_directory(&st, &dir)?;
     let mut by_sha: HashMap<Sha, Vec<String>> = HashMap::new();
     st.scan_under(
         &dir,
@@ -75,18 +76,21 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
     shas.sort_by_key(|s| {
         index
             .get(*s)
-            .map(|l| (l[0].pack, l[0].chunk_offset, l[0].offset))
+            .and_then(|l| l.first())
+            .map(|l| (l.pack, l.chunk_offset, l.offset))
             .unwrap_or((u32::MAX, 0, 0))
     });
     let mut reader = st.reader();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut hits = 0u64;
+    let mut failed = false;
     for sha in shas {
-        let bytes = match st.read_sha(&mut reader, sha) {
+        let bytes = match st.read_blob(&mut reader, sha, true) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("{}: {e:#}", hex::encode(sha));
+                failed = true;
                 continue;
             }
         };
@@ -128,5 +132,11 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
             }
         }
     }
-    Ok(if hits > 0 { 0 } else { 1 })
+    Ok(if failed {
+        2
+    } else if hits > 0 {
+        0
+    } else {
+        1
+    })
 }

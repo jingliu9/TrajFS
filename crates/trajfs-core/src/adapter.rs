@@ -33,6 +33,11 @@ pub trait Adapter: Send + Sync {
     fn batch_ready(&self, _src: &Path, _already: &[String]) -> Option<String> {
         None
     }
+    /// Fallible readiness discovery. Watchers must not treat unreadable source
+    /// trees as a successful "nothing ready" result.
+    fn try_batch_ready(&self, src: &Path, already: &[String]) -> anyhow::Result<Option<String>> {
+        Ok(self.batch_ready(src, already))
+    }
     /// Regexes on repo-relative paths that the pre-commit hook must refuse (raw run output).
     fn raw_patterns(&self) -> Vec<String> {
         Vec::new()

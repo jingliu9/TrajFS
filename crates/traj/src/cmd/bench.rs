@@ -43,7 +43,7 @@ pub fn run(stores: &[String], a: BenchArgs) -> Result<i32> {
     r.insert("version".into(), crate::VERSION.into());
     r.insert("date".into(), chrono::Utc::now().to_rfc3339().into());
     let tmp = tempfile_dir()?;
-    let cfg = crate::config::Config::find();
+    let cfg = crate::config::Config::try_find()?;
     let store = match (stores.first(), &a.source) {
         (Some(s), _) => crate::config::resolve_store(s, cfg.as_ref())?,
         (None, Some(src)) => {

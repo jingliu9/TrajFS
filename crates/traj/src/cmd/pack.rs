@@ -9,7 +9,7 @@ use trajfs_core::rules::Rules;
 pub struct PackArgs {
     /// Source tree (a run directory)
     pub src: PathBuf,
-    /// Destination store directory (default: <store_root>/<basename(src)>.trajstore from trajfs.toml)
+    /// Destination store directory (default: encoded data-root-relative run id under store_root)
     #[arg(long = "out", alias = "into")]
     pub out: Option<PathBuf>,
     /// Adapter: built-in (none, jsonl[:globs], copilot-cli, claude-code) or a path to an adapter TOML (default: trajfs.toml)
@@ -36,16 +36,21 @@ pub struct PackArgs {
 }
 
 pub fn resolve(a: &PackArgs) -> Result<(PathBuf, String, String)> {
-    let cfg = Config::find();
+    let cfg = Config::try_find()?;
     let store = match (&a.out, &cfg) {
         (Some(s), _) => s.clone(),
         (None, Some(c)) => {
-            let id = a.id.clone().unwrap_or_else(|| {
-                a.src
+            let source = crate::config::canon(&a.src);
+            let data = crate::config::canon(&c.data_root());
+            let id = match &a.id {
+                Some(id) => id.clone(),
+                None if source != data && source.starts_with(&data) => store_id(&data, &source)?,
+                None => a
+                    .src
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "store".into())
-            });
+                    .context("source has no run directory name")?,
+            };
             c.store_path(&id)
         }
         (None, None) => bail!("no --store given and no trajfs.toml found"),
@@ -72,7 +77,7 @@ pub fn resolve(a: &PackArgs) -> Result<(PathBuf, String, String)> {
 
 pub fn run(a: PackArgs) -> Result<i32> {
     let (store, adapter, rules) = resolve(&a)?;
-    let cfg = Config::find();
+    let cfg = Config::try_find()?;
     let ad = trajfs_adapters::resolve(&adapter, cfg.as_ref().map(|c| c.dir.as_path()))?;
     let rules_obj = Rules::resolve_from(&rules, cfg.as_ref().map(|c| c.dir.as_path()))?;
     let sum = ingest_with_max_artifact_bytes(
@@ -160,13 +165,22 @@ pub fn watch(a: WatchArgs) -> Result<i32> {
         for run_dir in runs {
             let id = store_id(&root, &run_dir)?;
             let store = cfg.store_path(&id);
-            let already: Vec<String> = trajfs_core::Manifest::load(&store)
-                .map(|m| m.batches.iter().map(|b| b.label.clone()).collect())
-                .unwrap_or_default();
-            if let Some(label) = ad.batch_ready(&run_dir, &already) {
+            let already: Vec<String> = if store.join("MANIFEST.json").try_exists()? {
+                trajfs_core::Manifest::load(&store)?
+                    .batches
+                    .iter()
+                    .map(|batch| batch.label.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if let Some(label) = ad.try_batch_ready(&run_dir, &already)? {
                 eprintln!("{}: packing {label}", run_dir.display());
                 let r = run_args_for(&run_dir, &store, &cfg, &label, &id, a.jobs, a.no_derive)?;
-                run(r)?;
+                let result = run(r)?;
+                if result != 0 {
+                    return Ok(result);
+                }
                 if a.commit {
                     crate::cmd::commit::run(crate::cmd::commit::CommitArgs {
                         store: store.display().to_string(),

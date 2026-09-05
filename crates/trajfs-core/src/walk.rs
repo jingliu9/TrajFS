@@ -46,7 +46,6 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
     let mut kept = Vec::new();
     let mut excluded = Vec::new();
     let mut errors = Vec::new();
-    let excl_dirs = &rules.file.exclude_dirs;
     let mut it = walkdir::WalkDir::new(&root).follow_links(false).into_iter();
     while let Some(entry) = it.next() {
         let entry = match entry {
@@ -61,8 +60,8 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
                 it.skip_current_dir();
                 continue;
             }
-            let n = entry.file_name().to_string_lossy();
-            if excl_dirs.iter().any(|x| x.as_str() == n) {
+            let rel = entry.path().strip_prefix(&root).unwrap().to_string_lossy();
+            if let Some(rule) = rules.prune_directory(&rel) {
                 // the whole subtree is left out; recorded once as a directory row
                 let rel = entry
                     .path()
@@ -70,11 +69,7 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
                     .unwrap()
                     .to_string_lossy()
                     .to_string();
-                excluded.push(Excluded {
-                    rel,
-                    size: 0,
-                    rule: "exclude_dirs",
-                });
+                excluded.push(Excluded { rel, size: 0, rule });
                 it.skip_current_dir();
                 continue;
             }

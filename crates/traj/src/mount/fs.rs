@@ -1,5 +1,5 @@
-//! `fuser::Filesystem` for `TrajFs` (docs/PLAN-fuse.md §4–§6). Every handler resolves an inode to its store and
-//! its parent's listing; nothing here touches the catalog per path except `getxattr` (adapter attrs).
+//! `fuser::Filesystem` for `TrajFs` (docs/PLAN-fuse.md §4–§6). Lookups resolve through parent listings;
+//! open directories pin their entries and offsets. Only xattrs scan individual catalog rows.
 
 use super::{EKind, Entry, InodeInfo, Snap, StoreHandle, TrajFs};
 use fuser::{
@@ -26,15 +26,19 @@ enum Node {
     Child(Arc<StoreHandle>, Entry),
 }
 
-struct Item {
-    ino: u64,
+pub(super) struct Item {
+    info: Arc<InodeInfo>,
     kind: FileType,
     name: String,
     attr: FileAttr,
 }
 
 fn ns_to_time(ns: i64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_nanos(ns.max(0) as u64)
+    if ns < 0 {
+        UNIX_EPOCH - Duration::from_nanos(ns.unsigned_abs())
+    } else {
+        UNIX_EPOCH + Duration::from_nanos(ns as u64)
+    }
 }
 
 fn snap_of(e: &Entry) -> Option<Snap> {
@@ -45,6 +49,7 @@ fn snap_of(e: &Entry) -> Option<Snap> {
             mode: e.mode,
             size: e.size,
             mtime_ns: e.mtime_ns,
+            batch: e.batch,
         }),
     }
 }
@@ -108,9 +113,18 @@ impl TrajFs {
     fn root_mtime(&self) -> SystemTime {
         self.all_stores()
             .iter()
+            .filter(|s| !s.gone.load(Ordering::Relaxed))
             .map(|s| s.batch_time())
             .max()
             .unwrap_or(UNIX_EPOCH)
+    }
+
+    fn filesystem_totals(&self) -> (u64, u64) {
+        self.all_stores()
+            .iter()
+            .filter(|s| !s.gone.load(Ordering::Relaxed))
+            .map(|s| s.totals())
+            .fold((0u64, 0u64), |(p, b), (x, y)| (p + x, b + y))
     }
 
     /// The store, after a freshness check; ENOENT when the store index is gone.
@@ -121,7 +135,10 @@ impl TrajFs {
         if h.gone.load(Ordering::Relaxed) {
             return Err(Errno::ENOENT);
         }
-        self.refresh_store(i, &h);
+        self.refresh_store(i, &h).map_err(|e| {
+            eprintln!("traj mount: {}: {e:#}", h.path.display());
+            Errno::EIO
+        })?;
         Ok(h)
     }
 
@@ -143,7 +160,10 @@ impl TrajFs {
         })?;
         match (listing.get(&info.name), &info.snap) {
             // the path was re-recorded with other content by a later batch: this inode keeps what it was
-            (Some(e), Some(snap)) if e.sha != info.sha => Ok(Node::Child(h, snap.entry(info))),
+            (Some(e), Some(snap)) if e.sha != info.sha || snap_of(e) != info.snap => {
+                Ok(Node::Child(h, snap.entry(info)))
+            }
+            (Some(e), None) if e.kind != EKind::Dir => Err(Errno::ENOENT),
             (Some(e), _) => Ok(Node::Child(h, e.clone())),
             (None, Some(snap)) => Ok(Node::Child(h, snap.entry(info))),
             (None, None) => Err(Errno::ENOENT),
@@ -169,7 +189,7 @@ impl TrajFs {
             return Err(Errno::ENOTDIR);
         }
         items.push(Item {
-            ino: info.ino,
+            info: info.clone(),
             kind: FileType::Directory,
             name: ".".into(),
             attr: self_attr,
@@ -177,7 +197,7 @@ impl TrajFs {
         let parent = self.inode(info.parent).unwrap_or_else(|| info.clone());
         let parent_attr = self.attr_of(&parent)?;
         items.push(Item {
-            ino: parent.ino,
+            info: parent.clone(),
             kind: FileType::Directory,
             name: "..".into(),
             attr: parent_attr,
@@ -189,7 +209,7 @@ impl TrajFs {
                     let Some(h) = self.store(i) else { continue };
                     let child = self.intern(1, &id, Some(i), [0u8; 32], None);
                     items.push(Item {
-                        ino: child.ino,
+                        info: child.clone(),
                         kind: FileType::Directory,
                         name: id,
                         attr: self.dir_attr(child.ino, h.batch_time(), 2),
@@ -211,7 +231,7 @@ impl TrajFs {
                         _ => FileType::RegularFile,
                     };
                     items.push(Item {
-                        ino: child.ino,
+                        info: child.clone(),
                         kind,
                         name: e.name.clone(),
                         attr: self.entry_attr(child.ino, e, &h),
@@ -222,18 +242,47 @@ impl TrajFs {
         Ok(items)
     }
 
+    fn open_dir(&self, info: &Arc<InodeInfo>) -> Result<u64, Errno> {
+        let items = Arc::new(self.dir_items(info)?);
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+        self.dir_handles.lock().unwrap().insert(fh, items);
+        Ok(fh)
+    }
+
+    fn dir_handle(&self, fh: u64) -> Option<Arc<Vec<Item>>> {
+        self.dir_handles.lock().unwrap().get(&fh).cloned()
+    }
+
+    fn entry_bytes(&self, h: &StoreHandle, entry: &Entry) -> anyhow::Result<Arc<Vec<u8>>> {
+        let bytes = if entry.kind == EKind::Empty {
+            Arc::new(Vec::new())
+        } else {
+            self.blob(h, &entry.sha)?
+        };
+        anyhow::ensure!(
+            entry.size >= 0 && bytes.len() as u64 == entry.size as u64,
+            "{}: content length does not match its recorded size",
+            entry.name
+        );
+        Ok(bytes)
+    }
+
     /// The catalog row of a file inode (for xattrs); `None` for directories and roots.
     fn row_of(
         &self,
         info: &InodeInfo,
     ) -> Result<Option<(Arc<StoreHandle>, trajfs_core::FileRow)>, Errno> {
-        let h = match self.node(info)? {
-            Node::Child(h, e) if e.kind != EKind::Dir => h,
+        let (h, entry) = match self.node(info)? {
+            Node::Child(h, e) if e.kind != EKind::Dir => (h, e),
             _ => return Ok(None),
         };
         let path = self.path_of(info);
-        let row = h.stat(&path).map_err(|_| Errno::EIO)?;
-        Ok(row.map(|r| (h, r)))
+        let row = h
+            .stat_version(&path, entry.batch)
+            .map_err(|_| Errno::EIO)?
+            .filter(|row| row.sha == entry.sha)
+            .ok_or(Errno::EIO)?;
+        Ok(Some((h, row)))
     }
 
     fn xattr_names(&self, info: &InodeInfo) -> Result<Vec<String>, Errno> {
@@ -365,15 +414,13 @@ impl Filesystem for TrajFs {
             return;
         };
         match self.node(&info) {
-            Ok(Node::Child(h, e)) if e.kind == EKind::Symlink => {
-                match h.blob(&e.sha, self.opts.verify) {
-                    Ok(b) => reply.data(&b),
-                    Err(err) => {
-                        eprintln!("traj mount: {}: {err:#}", self.path_of(&info));
-                        reply.error(Errno::EIO);
-                    }
+            Ok(Node::Child(h, e)) if e.kind == EKind::Symlink => match self.entry_bytes(&h, &e) {
+                Ok(b) => reply.data(&b),
+                Err(err) => {
+                    eprintln!("traj mount: {}: {err:#}", self.path_of(&info));
+                    reply.error(Errno::EIO);
                 }
-            }
+            },
             Ok(_) => reply.error(Errno::EINVAL),
             Err(e) => reply.error(e),
         }
@@ -381,7 +428,7 @@ impl Filesystem for TrajFs {
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         self.trim();
-        if flags.0 & libc::O_ACCMODE != libc::O_RDONLY {
+        if flags.0 & libc::O_ACCMODE != libc::O_RDONLY || flags.0 & libc::O_TRUNC != 0 {
             reply.error(Errno::EROFS);
             return;
         }
@@ -391,7 +438,7 @@ impl Filesystem for TrajFs {
         };
         let bytes = match self.node(&info) {
             Ok(Node::Child(h, e)) => match e.kind {
-                EKind::File => match self.blob(&h, &e.sha) {
+                EKind::File | EKind::Empty => match self.entry_bytes(&h, &e) {
                     Ok(b) => b,
                     Err(err) => {
                         eprintln!("traj mount: {}: {err:#}", self.path_of(&info));
@@ -399,7 +446,6 @@ impl Filesystem for TrajFs {
                         return;
                     }
                 },
-                EKind::Empty => Arc::new(Vec::new()),
                 EKind::Dir => {
                     reply.error(Errno::EISDIR);
                     return;
@@ -461,11 +507,8 @@ impl Filesystem for TrajFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        match self.attr_of(&info) {
-            Ok(a) if a.kind == FileType::Directory => {
-                reply.opened(FileHandle(0), FopenFlags::empty())
-            }
-            Ok(_) => reply.error(Errno::ENOTDIR),
+        match self.open_dir(&info) {
+            Ok(fh) => reply.opened(FileHandle(fh), FopenFlags::empty()),
             Err(e) => reply.error(e),
         }
     }
@@ -473,24 +516,17 @@ impl Filesystem for TrajFs {
     fn readdir(
         &self,
         _req: &Request,
-        ino: INodeNo,
-        _fh: FileHandle,
+        _ino: INodeNo,
+        fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let Some(info) = self.inode(ino.0) else {
-            reply.error(Errno::ENOENT);
+        let Some(items) = self.dir_handle(fh.0) else {
+            reply.error(Errno::EBADF);
             return;
         };
-        let items = match self.dir_items(&info) {
-            Ok(v) => v,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
         for (i, it) in items.iter().enumerate().skip(offset as usize) {
-            if reply.add(INodeNo(it.ino), (i + 1) as u64, it.kind, &it.name) {
+            if reply.add(INodeNo(it.info.ino), (i + 1) as u64, it.kind, &it.name) {
                 break;
             }
         }
@@ -500,26 +536,19 @@ impl Filesystem for TrajFs {
     fn readdirplus(
         &self,
         _req: &Request,
-        ino: INodeNo,
-        _fh: FileHandle,
+        _ino: INodeNo,
+        fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
-        let Some(info) = self.inode(ino.0) else {
-            reply.error(Errno::ENOENT);
+        let Some(items) = self.dir_handle(fh.0) else {
+            reply.error(Errno::EBADF);
             return;
-        };
-        let items = match self.dir_items(&info) {
-            Ok(v) => v,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
         };
         let ttl = self.ttl();
         for (i, it) in items.iter().enumerate().skip(offset as usize) {
             if reply.add(
-                INodeNo(it.ino),
+                INodeNo(it.info.ino),
                 (i + 1) as u64,
                 &it.name,
                 &ttl,
@@ -528,12 +557,10 @@ impl Filesystem for TrajFs {
             ) {
                 break;
             }
-            if let Some(child) = self.inode(it.ino) {
-                self.mark_served(&child);
-                if i >= 2 {
-                    // the kernel counts one lookup per readdirplus entry, `.` and `..` excepted
-                    child.nlookup.fetch_add(1, Ordering::Relaxed);
-                }
+            self.mark_served(&it.info);
+            if i >= 2 {
+                // the kernel counts one lookup per readdirplus entry, `.` and `..` excepted
+                it.info.nlookup.fetch_add(1, Ordering::Relaxed);
             }
         }
         reply.ok();
@@ -543,19 +570,16 @@ impl Filesystem for TrajFs {
         &self,
         _req: &Request,
         _ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
+        self.dir_handles.lock().unwrap().remove(&fh.0);
         reply.ok();
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let (paths, bytes) = self
-            .all_stores()
-            .iter()
-            .map(|s| s.totals())
-            .fold((0u64, 0u64), |(p, b), (x, y)| (p + x, b + y));
+        let (paths, bytes) = self.filesystem_totals();
         reply.statfs(bytes.div_ceil(4096), 0, 0, paths, 0, 4096, 255, 4096);
     }
 
@@ -594,5 +618,138 @@ impl Filesystem for TrajFs {
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         reply.ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mount::tests::{options, refresh_due, Fixture};
+
+    #[test]
+    fn review_negative_mtime_is_preserved() {
+        assert_eq!(ns_to_time(-1), UNIX_EPOCH - Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn review_kind_change_with_identical_bytes_gets_a_new_inode() {
+        let fs = TrajFs::multi(Vec::new(), None, options(), 0, 0);
+        let mut snap = Snap {
+            kind: EKind::File,
+            mode: 0o644,
+            size: 5,
+            mtime_ns: 0,
+            batch: 1,
+        };
+        let file = fs.intern(1, "same", Some(0), [1; 32], Some(snap));
+        snap.kind = EKind::Symlink;
+        let link = fs.intern(1, "same", Some(0), [1; 32], Some(snap));
+        assert_ne!(file.ino, link.ino);
+    }
+
+    #[test]
+    fn review_old_inode_xattrs_describe_its_original_contents() {
+        let fixture = Fixture::new(&[("file", b"original")]);
+        let handle = fixture.handle();
+        let fs = TrajFs::single(handle.clone(), options(), 0, 0);
+        let root = fs.inode(1).unwrap();
+        let items = fs.dir_items(&root).unwrap();
+        let info = items
+            .iter()
+            .find(|item| item.name == "file")
+            .unwrap()
+            .info
+            .clone();
+        let old_sha = fs.xattr_value(&info, XATTR_SHA).unwrap();
+        let old_batch = fs.xattr_value(&info, XATTR_BATCH).unwrap();
+        std::fs::write(fixture.src.join("file"), b"replacement contents").unwrap();
+        fixture.pack();
+        refresh_due(&handle);
+        fs.live_store(0).unwrap();
+        assert_eq!(fs.xattr_value(&info, XATTR_SHA).unwrap(), old_sha);
+        assert_eq!(fs.xattr_value(&info, XATTR_BATCH).unwrap(), old_batch);
+    }
+
+    #[test]
+    fn review_failed_manifest_refresh_returns_an_error_until_recovery() {
+        let fixture = Fixture::new(&[("file", b"bytes")]);
+        let handle = fixture.handle();
+        let fs = TrajFs::single(handle.clone(), options(), 0, 0);
+        let manifest = fixture.store.join("MANIFEST.json");
+        let original = std::fs::read(&manifest).unwrap();
+        std::fs::write(&manifest, b"invalid manifest").unwrap();
+        refresh_due(&handle);
+        assert!(fs.live_store(0).is_err());
+        assert!(fs.live_store(0).is_err());
+        std::fs::write(&manifest, original).unwrap();
+        refresh_due(&handle);
+        assert!(fs.live_store(0).is_ok());
+    }
+
+    #[test]
+    fn review_directory_handles_keep_offsets_stable_across_append() {
+        let fixture = Fixture::new(&[("b", b"second"), ("c", b"third")]);
+        let handle = fixture.handle();
+        let fs = TrajFs::single(handle.clone(), options(), 0, 0);
+        let root = fs.inode(1).unwrap();
+        let fh = fs.open_dir(&root).unwrap();
+        std::fs::write(fixture.src.join("a"), b"first").unwrap();
+        fixture.pack();
+        refresh_due(&handle);
+        fs.live_store(0).unwrap();
+        let old = fs.dir_handle(fh).unwrap();
+        let tail: Vec<_> = old
+            .iter()
+            .skip(3)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(tail, ["c"]);
+        let fresh = fs.dir_items(&root).unwrap();
+        let names: Vec<_> = fresh
+            .iter()
+            .skip(2)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        for entry in old.iter() {
+            assert!(!fs
+                .inodes
+                .write()
+                .unwrap()
+                .remove_unreferenced(entry.info.ino));
+        }
+        fs.dir_handles.lock().unwrap().remove(&fh);
+        assert!(fs.dir_handle(fh).is_none());
+    }
+
+    #[test]
+    fn review_mount_checks_catalog_size_even_for_a_cached_blob() {
+        let fixture = Fixture::new(&[("file", b"bytes"), ("empty", b"")]);
+        let handle = fixture.handle();
+        let fs = TrajFs::single(handle.clone(), options(), 0, 0);
+        let listing = handle.listing("").unwrap();
+        let mut entry = listing.get("file").unwrap().clone();
+        assert_eq!(
+            fs.entry_bytes(&handle, &entry).unwrap().as_slice(),
+            b"bytes"
+        );
+        entry.size += 1;
+        assert!(fs.entry_bytes(&handle, &entry).is_err());
+        assert!(fs
+            .entry_bytes(&handle, listing.get("empty").unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn review_removed_stores_are_excluded_from_filesystem_statistics() {
+        let first = Fixture::new(&[("a", b"a")]);
+        let second = Fixture::new(&[("b", b"bb")]);
+        let gone = first.handle();
+        let remaining = StoreHandle::open("other", &second.store, 100).unwrap();
+        let fs = TrajFs::multi(vec![gone.clone(), remaining.clone()], None, options(), 0, 0);
+        gone.gone.store(true, Ordering::Relaxed);
+        assert_eq!(fs.filesystem_totals(), remaining.totals());
+        assert_eq!(fs.store_ids(), [(1, "other".into())]);
     }
 }

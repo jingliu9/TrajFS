@@ -128,7 +128,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
 
 /// The single store named by `-S` (or TRAJ_STORE).
 pub(crate) fn one_store(stores: &[String]) -> Result<trajfs_core::Store> {
-    let cfg = config::Config::find();
+    let cfg = config::Config::try_find()?;
     let arg = match stores {
         [] => anyhow::bail!("no store given: pass -S <store-dir|store-id> or set TRAJ_STORE"),
         [s] => s,
@@ -153,7 +153,7 @@ pub(crate) fn human(n: i64) -> String {
 
 /// Normalise a user path argument: trim `./`, leading and trailing `/`.
 pub(crate) fn norm(p: &str) -> String {
-    let mut s = p.trim();
+    let mut s = p;
     while let Some(r) = s.strip_prefix("./") {
         s = r;
     }

@@ -1,6 +1,6 @@
 //! The derived `events` envelope (docs/PLAN.md §3.5) and its Parquet writer.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use arrow::array::{
     ArrayBuilder, ArrayRef, Int32Builder, StringBuilder, TimestampMicrosecondBuilder, UInt16Builder,
 };
@@ -177,10 +177,15 @@ impl SegmentedEventsWriter {
         adapter_version: u16,
         max_bytes: u64,
     ) -> Result<Self> {
+        let stem = stem.into();
+        crate::catalog::validate_segment_stem(&stem)?;
+        if max_bytes == 0 {
+            bail!("Parquet segment size limit must be greater than zero");
+        }
         std::fs::create_dir_all(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
-            stem: stem.into(),
+            stem,
             adapter_version,
             max_bytes,
             buffer: Vec::new(),

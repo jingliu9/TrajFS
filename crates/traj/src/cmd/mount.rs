@@ -1,8 +1,12 @@
 //! `traj mount` / `traj umount` (docs/PLAN-fuse.md §3, §8). The filesystem itself is in `crate::mount`.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Args;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SETTINGS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Args, Debug)]
 pub struct MountArgs {
@@ -80,10 +84,21 @@ pub fn vscode_machine_settings() -> Vec<PathBuf> {
 /// path), `search.followSymlinks: false`. Existing settings are kept; a file that is not JSON is left
 /// alone and reported.
 pub fn merge_vscode_settings(file: &Path, mount: &Path) -> Result<()> {
-    let mut root: serde_json::Value = match std::fs::read_to_string(file) {
+    let target = match std::fs::symlink_metadata(file) {
+        Ok(_) => file
+            .canonicalize()
+            .with_context(|| format!("resolve {}", file.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => file.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+    };
+    let mut root: serde_json::Value = match std::fs::read_to_string(&target) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("{}: not JSON ({e}); not touching it", file.display()))?,
-        _ => serde_json::json!({}),
+        Ok(_) => serde_json::json!({}),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => {
+            return Err(e).with_context(|| format!("read {}; not touching it", file.display()))
+        }
     };
     let obj = root
         .as_object_mut()
@@ -94,7 +109,10 @@ pub fn merge_vscode_settings(file: &Path, mount: &Path) -> Result<()> {
     for key in ["files.watcherExclude", "files.readonlyInclude"] {
         let map = obj.entry(key).or_insert_with(|| serde_json::json!({}));
         if !map.is_object() {
-            *map = serde_json::json!({});
+            bail!(
+                "{}: {key} is not an object; not touching it",
+                file.display()
+            );
         }
         let map = map.as_object_mut().unwrap();
         for p in &patterns {
@@ -103,14 +121,39 @@ pub fn merge_vscode_settings(file: &Path, mount: &Path) -> Result<()> {
     }
     obj.entry("search.followSymlinks")
         .or_insert(serde_json::Value::Bool(false));
-    if let Some(d) = file.parent() {
+    if let Some(d) = target.parent() {
         std::fs::create_dir_all(d)?;
     }
-    // write-then-rename: a concurrent reader never sees a truncated file
-    let tmp = file.with_extension(format!("json.traj-{}", std::process::id()));
-    std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(&root)?))?;
-    std::fs::rename(&tmp, file)?;
-    Ok(())
+    let permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    let (tmp, mut output) = loop {
+        let serial = SETTINGS_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = target.with_extension(format!("json.traj-{}-{serial}", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&tmp) {
+            Ok(output) => break (tmp, output),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("write {}", file.display())),
+        }
+    };
+    let result = (|| -> Result<()> {
+        writeln!(output, "{}", serde_json::to_string_pretty(&root)?)?;
+        if let Some(permissions) = permissions {
+            output.set_permissions(permissions)?;
+        }
+        output.sync_all()?;
+        std::fs::rename(&tmp, &target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[derive(Args, Debug)]
@@ -125,13 +168,21 @@ pub struct UmountArgs {
 /// (mountpoint, fstype) of every mount visible to this process.
 pub fn proc_mounts() -> Vec<(PathBuf, String)> {
     let text = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    parse_mounts(&text)
+        .into_iter()
+        .map(|(mp, ty, _)| (mp, ty))
+        .collect()
+}
+
+fn parse_mounts(text: &str) -> Vec<(PathBuf, String, String)> {
     text.lines()
         .filter_map(|l| {
-            let mut it = l.split(' ');
+            let mut it = l.split_whitespace();
             let _dev = it.next()?;
             let mp = unescape_mount(it.next()?);
             let ty = it.next()?.to_string();
-            Some((PathBuf::from(mp), ty))
+            let options = it.next()?.to_string();
+            Some((PathBuf::from(mp), ty, options))
         })
         .collect()
 }
@@ -159,10 +210,31 @@ fn unescape_mount(s: &str) -> String {
 
 /// Every `fuse.traj` mount of this user.
 pub fn traj_mounts() -> Vec<PathBuf> {
-    proc_mounts()
+    let uid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .and_then(|uids| uids.split_whitespace().nth(1))
+                .and_then(|uid| uid.parse().ok())
+        });
+    let Some(uid) = uid else { return Vec::new() };
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    owned_traj_mounts(&mounts, uid)
+}
+
+fn owned_traj_mounts(text: &str, uid: u32) -> Vec<PathBuf> {
+    parse_mounts(text)
         .into_iter()
-        .filter(|(_, ty)| ty == "fuse.traj")
-        .map(|(mp, _)| mp)
+        .filter(|(_, ty, options)| {
+            ty == "fuse.traj"
+                && options
+                    .split(',')
+                    .find_map(|option| option.strip_prefix("user_id="))
+                    .and_then(|owner| owner.parse::<u32>().ok())
+                    == Some(uid)
+        })
+        .map(|(mp, _, _)| mp)
         .collect()
 }
 
@@ -185,7 +257,7 @@ pub fn fusermount_unmount(mp: &Path, lazy: bool) -> Result<()> {
     if lazy {
         cmd.arg("-z");
     }
-    let out = cmd.arg(mp).output();
+    let out = cmd.arg("--").arg(mp).output();
     let out = match out {
         Ok(o) => o,
         Err(_) => {
@@ -195,7 +267,7 @@ pub fn fusermount_unmount(mp: &Path, lazy: bool) -> Result<()> {
             if lazy {
                 cmd.arg("-z");
             }
-            cmd.arg(mp).output().map_err(|e| {
+            cmd.arg("--").arg(mp).output().map_err(|e| {
                 anyhow::anyhow!("fusermount3/fusermount not found ({e}); install the fuse3 package")
             })?
         }
@@ -253,7 +325,16 @@ mod linux {
     use std::time::Duration;
 
     pub fn run(stores: &[String], a: MountArgs) -> Result<i32> {
-        let cfg = Config::find();
+        let opts = Options {
+            ttl: Duration::try_from_secs_f64(a.ttl)
+                .context("--ttl must be a finite, nonnegative duration")?,
+            blob_cache_bytes: parse_size(&a.blob_cache)?,
+            listing_cache: a.listing_cache,
+            memory_bytes: parse_memory(&a.memory)?,
+            verify: !a.no_verify,
+            debug: std::env::var_os("TRAJ_MOUNT_DEBUG").is_some(),
+        };
+        let cfg = Config::try_find()?;
         let mp = match (&a.mountpoint, &cfg) {
             (Some(p), _) => p.clone(),
             (None, Some(c)) => match &c.file.mount_root {
@@ -302,6 +383,12 @@ mod linux {
         }
         // the mountpoint
         if is_stale(&mp) {
+            if !traj_mounts().iter().any(|mounted| *mounted == canon(&mp)) {
+                bail!(
+                    "{} is a stale mount not owned by this user's traj; not unmounting it",
+                    mp.display()
+                );
+            }
             eprintln!("traj mount: {} is a stale mount; clearing it", mp.display());
             fusermount_unmount(&mp, true)?;
         }
@@ -375,14 +462,6 @@ mod linux {
         }
 
         let md = std::fs::metadata(&mp)?;
-        let opts = Options {
-            ttl: Duration::from_secs_f64(a.ttl.max(0.0)),
-            blob_cache_bytes: parse_size(&a.blob_cache)?,
-            listing_cache: a.listing_cache,
-            memory_bytes: parse_memory(&a.memory)?,
-            verify: !a.no_verify,
-            debug: std::env::var_os("TRAJ_MOUNT_DEBUG").is_some(),
-        };
         let label = if multi {
             store_root
                 .as_ref()
@@ -465,14 +544,19 @@ mod linux {
                 format!("{} MB", fs_memory >> 20)
             }
         );
-        match session.run() {
+        check_session_result(session.run())?;
+        eprintln!("traj mount: {} unmounted", mp.display());
+        Ok(0)
+    }
+
+    fn check_session_result(result: std::io::Result<()>) -> Result<()> {
+        match result {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {}
             Err(e) if e.raw_os_error() == Some(libc::ENODEV) => {}
-            Err(e) => eprintln!("traj mount: session ended: {e}"),
+            Err(e) => return Err(e).context("FUSE session failed"),
         }
-        eprintln!("traj mount: {} unmounted", mp.display());
-        Ok(0)
+        Ok(())
     }
 
     /// `20%` of MemTotal, a size such as `2G`, or `0` for unbounded.
@@ -486,6 +570,11 @@ mod linux {
                 .trim()
                 .parse()
                 .with_context(|| format!("{s}: not a percentage"))?;
+            if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+                bail!(
+                    "{s}: percentage must be greater than 0 and at most 100 (use 0 for unbounded)"
+                );
+            }
             let total = std::fs::read_to_string("/proc/meminfo")
                 .ok()
                 .and_then(|t| {
@@ -519,7 +608,9 @@ mod linux {
         // SAFETY: setsid is async-signal-safe and touches no memory of the parent
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -545,9 +636,104 @@ mod linux {
             }
             if start.elapsed() > Duration::from_secs(10) {
                 let _ = child.kill();
+                let _ = child.wait();
                 bail!("mount did not come up within 10 s; log {}", log.display());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn review_memory_percentage_rejects_invalid_values() {
+            for input in ["NaN%", "inf%", "-1%", "101%"] {
+                assert!(parse_memory(input).is_err(), "{input}");
+            }
+            assert_eq!(parse_memory("0").unwrap(), 0);
+            assert!(parse_memory("20%").unwrap() > 0);
+        }
+
+        #[test]
+        fn review_session_errors_are_not_reported_as_success() {
+            assert!(check_session_result(Ok(())).is_ok());
+            assert!(
+                check_session_result(Err(std::io::Error::from_raw_os_error(libc::ENODEV))).is_ok()
+            );
+            assert!(
+                check_session_result(Err(std::io::Error::from_raw_os_error(libc::EIO))).is_err()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_invalid_utf8_settings_are_not_overwritten() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let file = dir.path().join("settings.json");
+        let original = [0xff, 0xfe];
+        std::fs::write(&file, original).unwrap();
+        assert!(merge_vscode_settings(&file, &dir.path().join("mount")).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+    }
+
+    #[test]
+    fn review_non_object_settings_are_not_discarded() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let file = dir.path().join("settings.json");
+        let original = r#"{"files.watcherExclude":["existing"],"editor.fontSize":17}"#;
+        std::fs::write(&file, original).unwrap();
+        assert!(merge_vscode_settings(&file, &dir.path().join("mount")).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    }
+
+    #[test]
+    fn review_default_unmount_targets_only_the_calling_users_traj_mounts() {
+        let mounts = concat!(
+            "traj:a /mnt/my\\040store fuse.traj ro,user_id=1001,group_id=1001 0 0\n",
+            "traj:b /mnt/other fuse.traj ro,user_id=1002,group_id=1002 0 0\n",
+            "ssh /mnt/ssh fuse.sshfs ro,user_id=1001,group_id=1001 0 0\n",
+            "traj:c /mnt/no-owner fuse.traj ro 0 0\n",
+        );
+        assert_eq!(
+            owned_traj_mounts(mounts, 1001),
+            [PathBuf::from("/mnt/my store")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_settings_merge_preserves_symlinks_permissions_and_other_values() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let target = dir.path().join("shared.json");
+        let file = dir.path().join("settings.json");
+        std::fs::write(
+            &target,
+            r#"{"editor.fontSize":17,"files.watcherExclude":{"existing":true}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink("shared.json", &file).unwrap();
+        merge_vscode_settings(&file, &dir.path().join("mount")).unwrap();
+        assert!(std::fs::symlink_metadata(&file).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(settings["editor.fontSize"], 17);
+        assert_eq!(settings["files.watcherExclude"]["existing"], true);
+        assert_eq!(
+            settings["files.watcherExclude"].as_object().unwrap().len(),
+            2
+        );
     }
 }

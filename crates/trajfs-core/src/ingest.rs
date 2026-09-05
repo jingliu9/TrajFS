@@ -3,7 +3,7 @@
 use crate::adapter::Adapter;
 use crate::catalog;
 use crate::events::SegmentedEventsWriter;
-use crate::hash::{sha_of_bytes, sha_of_file};
+use crate::hash::{sha_of_bytes, FileSnapshot};
 use crate::manifest::{
     artifact_path_cmp, remove_manifest_temps, resolve_store_artifact, validate_adapter_name,
     AdapterInfo, Batch, Manifest, RulesInfo,
@@ -32,6 +32,13 @@ pub struct IngestSummary {
     pub batch: Batch,
     pub skipped_unchanged: u64,
     pub store: PathBuf,
+}
+
+struct HashedCandidate {
+    index: usize,
+    sha: Sha,
+    snapshot: Option<FileSnapshot>,
+    link_target: Option<Vec<u8>>,
 }
 
 fn ts_now() -> String {
@@ -214,75 +221,120 @@ pub fn ingest_with_max_artifact_bytes(
         vec![]
     };
     let w = walk(&src, &opts.rules, &skip)?;
-    let mut errors = w.errors.clone();
+    let errors = w.errors.clone();
 
-    // 2. skip unchanged paths (same size and mtime as an existing row)
-    let mut existing: HashMap<String, (i64, i64, Sha)> = HashMap::new();
+    // Reuse blobs, but do not treat size/mtime as proof of unchanged content:
+    // tools can replace files while preserving both.
+    let mut existing: HashMap<String, FileRow> = HashMap::new();
     let mut known_shas: HashSet<Sha> = HashSet::new();
     if !manifest.batches.is_empty() {
         let st = crate::store::Store::open_unlocked(&store)?;
-        st.for_each_file(false, |r| {
-            existing.insert(r.path, (r.size, r.mtime_ns, r.sha));
-        })?;
+        let report = st.verify(false)?;
+        if !report.ok() {
+            bail!("existing store fails consistency verification; repair it before appending");
+        }
+        st.scan_under(
+            "",
+            true,
+            |_| true,
+            |r| {
+                existing.insert(r.path.clone(), r);
+            },
+        )?;
         known_shas = st.index()?.keys().copied().collect();
     }
     let mut skipped = 0u64;
-    let mut todo: Vec<&Candidate> = Vec::new();
-    for c in &w.kept {
-        if let Some((size, mtime, _)) = existing.get(&c.rel) {
-            if *size == c.size as i64 && *mtime == c.mtime_ns {
-                skipped += 1;
-                continue;
-            }
-        }
-        todo.push(c);
-    }
+    let todo: Vec<&Candidate> = w.kept.iter().collect();
 
     // 3. hash
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.jobs.max(1))
         .build()?;
-    let hashed: Vec<Result<(usize, Sha, Option<Vec<u8>>)>> = pool.install(|| {
+    let hashed: Vec<Result<HashedCandidate>> = pool.install(|| {
         todo.par_iter()
             .enumerate()
             .map(|(i, c)| match c.kind {
-                Kind::Empty => Ok((i, sha_of_bytes(b""), None)),
                 Kind::Symlink => {
                     let t = std::fs::read_link(&c.abs)?;
                     let b = t.as_os_str().as_encoded_bytes().to_vec();
-                    Ok((i, sha_of_bytes(&b), Some(b)))
+                    Ok(HashedCandidate {
+                        index: i,
+                        sha: sha_of_bytes(&b),
+                        snapshot: None,
+                        link_target: Some(b),
+                    })
                 }
-                Kind::File => {
-                    let (sha, _) = sha_of_file(&c.abs)?;
-                    Ok((i, sha, None))
+                Kind::File | Kind::Empty => {
+                    let snapshot = FileSnapshot::capture(&c.abs)?;
+                    Ok(HashedCandidate {
+                        index: i,
+                        sha: snapshot.sha,
+                        snapshot: Some(snapshot),
+                        link_target: None,
+                    })
                 }
             })
             .collect()
     });
     let mut rows: Vec<FileRow> = Vec::with_capacity(todo.len());
     let mut link_targets: HashMap<Sha, Vec<u8>> = HashMap::new();
+    let mut snapshots: HashMap<usize, FileSnapshot> = HashMap::new();
     let mut ok_idx: Vec<usize> = Vec::new();
     for h in hashed {
-        match h {
-            Ok((i, sha, target)) => {
-                let c = todo[i];
-                if let Some(t) = target {
-                    link_targets.insert(sha, t);
-                }
-                rows.push(FileRow {
-                    path: c.rel.clone(),
-                    kind: c.kind,
-                    mode: c.mode,
-                    size: c.size as i64,
-                    sha,
-                    mtime_ns: c.mtime_ns,
-                    batch: batch_id,
-                    attrs: opts.adapter.attrs(&c.rel),
-                });
-                ok_idx.push(i);
-            }
-            Err(e) => errors.push(format!("{e:#}")),
+        // A changed/unreadable hashed source aborts this batch rather than
+        // publishing a partial checkpoint that silently loses authoritative logs.
+        let h = h?;
+        let c = todo[h.index];
+        let (kind, size, mode, mtime_ns) = if let Some(snapshot) = &h.snapshot {
+            (
+                if snapshot.size() == 0 {
+                    Kind::Empty
+                } else {
+                    Kind::File
+                },
+                snapshot.size(),
+                snapshot.mode(),
+                snapshot.mtime_ns(),
+            )
+        } else {
+            (
+                Kind::Symlink,
+                h.link_target.as_ref().unwrap().len() as u64,
+                c.mode,
+                c.mtime_ns,
+            )
+        };
+        let row = FileRow {
+            path: c.rel.clone(),
+            kind,
+            mode,
+            size: size
+                .try_into()
+                .context("source file exceeds catalog size limit")?,
+            sha: h.sha,
+            mtime_ns,
+            batch: batch_id,
+            attrs: opts.adapter.attrs(&c.rel),
+        };
+        if existing.get(&row.path).is_some_and(|previous| {
+            previous.sha == row.sha
+                && previous.kind == row.kind
+                && previous.mode == row.mode
+                && previous.size == row.size
+                && previous.mtime_ns == row.mtime_ns
+                && previous.attrs == row.attrs
+        }) {
+            skipped += 1;
+            continue;
         }
+        if let Some(target) = h.link_target {
+            link_targets.insert(h.sha, target);
+        }
+        if let Some(snapshot) = h.snapshot {
+            snapshots.insert(h.index, snapshot);
+        }
+        rows.push(row);
+        ok_idx.push(h.index);
     }
     // rows are in walk order (sorted by path) because par_iter preserves order in collect
     let bytes_total: u64 = rows.iter().map(|r| r.size as u64).sum();
@@ -290,21 +342,21 @@ pub fn ingest_with_max_artifact_bytes(
     // 4. pack new blobs
     let mut pw = PackWriter::with_max_bytes(&packs_dir, first_pack, max_artifact_bytes)?;
     let mut new: HashSet<Sha> = HashSet::new();
-    let mut small: Vec<(Sha, PathBuf, u64)> = Vec::new();
-    let mut large: Vec<(Sha, PathBuf)> = Vec::new();
+    let mut small = Vec::new();
+    let mut large = Vec::new();
     let mut new_blob_bytes = 0u64;
     for (r, &i) in rows.iter().zip(&ok_idx) {
         if r.kind == Kind::Empty || known_shas.contains(&r.sha) || !new.insert(r.sha) {
+            if let Some(snapshot) = snapshots.get(&i) {
+                snapshot.verify()?;
+            }
             continue;
         }
         new_blob_bytes += r.size as u64;
-        let c = todo[i];
         match r.kind {
             Kind::Symlink => {} // handled below from link_targets
-            Kind::File if c.size as usize <= pw.chunk_bytes() => {
-                small.push((r.sha, c.abs.clone(), c.size))
-            }
-            Kind::File => large.push((r.sha, c.abs.clone())),
+            Kind::File if r.size as u64 <= pw.chunk_bytes() as u64 => small.push(&snapshots[&i]),
+            Kind::File => large.push(&snapshots[&i]),
             Kind::Empty => {}
         }
     }
@@ -313,9 +365,9 @@ pub fn ingest_with_max_artifact_bytes(
             pw.add_bytes(*sha, t)?;
         }
     }
-    pool.install(|| pw.add_many_parallel(&small))?;
-    for (sha, p) in &large {
-        pw.add_file(*sha, p)?;
+    pool.install(|| pw.add_snapshots_parallel(&small))?;
+    for snapshot in large {
+        pw.add_snapshot(snapshot)?;
     }
     let (index_rows, packs, _bin, bout) = pw.finish()?;
 
@@ -334,11 +386,11 @@ pub fn ingest_with_max_artifact_bytes(
     // 6. derived tables
     let mut derived = Vec::new();
     if opts.derive {
-        let traj: Vec<(&FileRow, &Candidate)> = rows
+        let traj: Vec<(&FileRow, &FileSnapshot)> = rows
             .iter()
             .zip(&ok_idx)
             .filter(|(r, _)| r.kind == Kind::File && opts.adapter.is_trajectory(&r.path))
-            .map(|(r, &i)| (r, todo[i]))
+            .map(|(r, &i)| (r, &snapshots[&i]))
             .collect();
         if !traj.is_empty() {
             ensure_store_dir(&store, Path::new("derived"))?;
@@ -349,8 +401,8 @@ pub fn ingest_with_max_artifact_bytes(
                 opts.adapter.version(),
                 max_artifact_bytes,
             )?;
-            for (r, c) in traj {
-                let bytes = std::fs::read(&c.abs)?;
+            for (r, snapshot) in traj {
+                let bytes = snapshot.read_bytes()?;
                 let evs = opts.adapter.parse_events(&r.path, &bytes);
                 ew.push(&r.path, evs)?;
             }

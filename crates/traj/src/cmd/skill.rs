@@ -102,7 +102,7 @@ fn strip_frontmatter(text: &str) -> String {
 pub fn run(a: SkillArgs) -> Result<i32> {
     match a.which {
         Which::Export { out, stdout } => {
-            let cfg = Config::find();
+            let cfg = Config::try_find()?;
             if stdout {
                 print!("{}", render(cfg.as_ref()));
                 return Ok(0);

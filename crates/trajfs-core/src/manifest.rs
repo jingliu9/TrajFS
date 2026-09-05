@@ -90,6 +90,7 @@ impl ArtifactInventory {
 
 fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty()
+        && !path.as_os_str().as_encoded_bytes().contains(&0)
         && path
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
@@ -98,7 +99,11 @@ fn safe_relative(path: &Path) -> bool {
 pub fn validate_adapter_name(name: &str) -> Result<()> {
     let mut parts = Path::new(name).components();
     match (parts.next(), parts.next()) {
-        (Some(Component::Normal(part)), None) if !part.is_empty() => Ok(()),
+        (Some(Component::Normal(part)), None)
+            if part == std::ffi::OsStr::new(name) && !name.contains('\0') =>
+        {
+            Ok(())
+        }
         _ => bail!("adapter name {name:?} must be exactly one non-empty path component"),
     }
 }
@@ -271,16 +276,26 @@ impl Manifest {
                 crate::FORMAT_VERSION
             );
         }
-        validate_adapter_name(&m.adapter.name)?;
+        m.artifacts()?;
         Ok(m)
     }
 
     pub fn artifacts(&self) -> Result<ArtifactInventory> {
+        if !(1..=crate::FORMAT_VERSION).contains(&self.format) {
+            bail!("store format {} is not supported", self.format);
+        }
         validate_adapter_name(&self.adapter.name)?;
         let mut inventory = ArtifactInventory::default();
         let mut batches: Vec<&Batch> = self.batches.iter().collect();
         batches.sort_by_key(|batch| batch.id);
+        let mut batch_ids = BTreeSet::new();
         for batch in batches {
+            if batch.id == 0 || !batch_ids.insert(batch.id) {
+                bail!(
+                    "manifest contains invalid or duplicate batch id {}",
+                    batch.id
+                );
+            }
             let mut segments = if batch.segments.is_empty() {
                 if self.format == 1 {
                     vec![format!("files-{:04}", batch.id)]
@@ -314,6 +329,9 @@ impl Manifest {
                     .push(parquet_path("packs", &format!("index-{suffix}"))?);
             }
             for pack in &batch.packs {
+                if *pack == 0 {
+                    bail!("manifest pack identifiers start at one");
+                }
                 inventory
                     .packs
                     .push(PathBuf::from("packs").join(format!("{pack:04}.pack")));
@@ -415,6 +433,7 @@ impl Manifest {
     }
 
     pub fn save_with_limit(&self, store: &Path, max_bytes: u64) -> Result<()> {
+        self.artifacts()?;
         let store = store.canonicalize()?;
         let p = Self::path(&store);
         remove_manifest_temps(&store)?;

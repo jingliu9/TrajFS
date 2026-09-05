@@ -15,7 +15,7 @@ pub struct CommitArgs {
 }
 
 pub fn run(a: CommitArgs) -> Result<i32> {
-    let cfg = Config::find();
+    let cfg = Config::try_find()?;
     let store = resolve_store(&a.store, cfg.as_ref())?;
     let store = store.canonicalize()?;
     let repo = git_toplevel(&store).context("the store is not inside a git work tree")?;
@@ -23,7 +23,14 @@ pub fn run(a: CommitArgs) -> Result<i32> {
     let Some(last) = m.batches.last() else {
         bail!("store has no batches")
     };
-    let rel = store.strip_prefix(&repo).unwrap_or(&store);
+    let rel = store
+        .strip_prefix(&repo)
+        .context("store is outside its Git worktree")?;
+    let relative = rel.display().to_string();
+    let snapshot = trajfs_core::Store::open(&store)?;
+    if !snapshot.verify(false)?.ok() {
+        bail!("store fails verification; refusing to stage or commit it");
+    }
     let msg = a.message.clone().unwrap_or_else(|| {
         format!(
             "trajstore {}: batch {} {}\n\n{} paths, {} new blobs ({} packed), adapter {} v{}, rules {} v{}\nsource {}",
@@ -42,6 +49,7 @@ pub fn run(a: CommitArgs) -> Result<i32> {
     });
     let git = |args: &[&str]| -> Result<()> {
         let st = Command::new("git")
+            .arg("--literal-pathspecs")
             .arg("-C")
             .arg(&repo)
             .args(args)
@@ -53,12 +61,19 @@ pub fn run(a: CommitArgs) -> Result<i32> {
         Ok(())
     };
     // only the store's own files: new batch files are the only untracked/changed ones
-    git(&["add", "-A", "--", &rel.display().to_string()])?;
+    git(&["add", "-A", "--", &relative])?;
     let staged = Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(&repo)
-        .args(["diff", "--cached", "--name-only", "-z"])
+        .args(["diff", "--cached", "--name-only", "-z", "--", &relative])
         .output()?;
+    if !staged.status.success() {
+        bail!(
+            "cannot inspect staged store changes: {}",
+            String::from_utf8_lossy(&staged.stderr)
+        );
+    }
     let n = String::from_utf8_lossy(&staged.stdout)
         .split('\0')
         .filter(|s| !s.is_empty())
@@ -67,7 +82,7 @@ pub fn run(a: CommitArgs) -> Result<i32> {
         println!("nothing to commit for {}", rel.display());
         return Ok(0);
     }
-    git(&["commit", "-q", "-m", &msg])?;
+    git(&["commit", "--only", "-q", "-m", &msg, "--", &relative])?;
     println!("committed {n} files of {}", rel.display());
     if a.push {
         git(&["push"])?;

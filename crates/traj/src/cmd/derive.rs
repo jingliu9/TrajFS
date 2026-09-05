@@ -15,7 +15,7 @@ pub struct DeriveArgs {
 
 /// Full rebuild of `derived/<adapter>/events-*.parquet` from the packs.
 pub fn run(stores: &[String], a: DeriveArgs) -> Result<i32> {
-    let cfg = Config::find();
+    let cfg = Config::try_find()?;
     let store_arg = match stores {
         [] => anyhow::bail!("no store given: pass -S <store-dir|store-id> or set TRAJ_STORE"),
         [store] => store,

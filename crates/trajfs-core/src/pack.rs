@@ -1,13 +1,15 @@
 //! Pack files: `TRAJPACK\x01` magic followed by independent zstd frames ("chunks").
 //! `packs/index-B[-P].parquet` maps sha → (pack, chunk_offset, chunk_len, offset, size, part).
 
+use crate::hash::FileSnapshot;
 use crate::{Sha, CHUNK_BYTES, PACK_SEAL_BYTES};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const MAGIC: &[u8; 9] = b"TRAJPACK\x01";
@@ -65,6 +67,7 @@ impl PackWriter {
         first_pack_id: u32,
         max_pack_bytes: u64,
     ) -> Result<Self> {
+        ensure!(first_pack_id > 0, "pack identifiers start at one");
         if max_pack_bytes <= MAGIC.len() as u64 + 2 {
             bail!("pack size limit {max_pack_bytes} is too small");
         }
@@ -99,6 +102,10 @@ impl PackWriter {
 
     /// Add a whole blob (already in memory).
     pub fn add_bytes(&mut self, sha: Sha, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            crate::hash::sha_of_bytes(bytes) == sha,
+            "blob hash does not match supplied bytes"
+        );
         if bytes.is_empty() {
             return Ok(());
         }
@@ -120,37 +127,29 @@ impl PackWriter {
         Ok(())
     }
 
-    /// Add a blob by streaming a file in CHUNK_BYTES parts (memory stays bounded for large files).
-    pub fn add_file(&mut self, sha: Sha, path: &Path) -> Result<()> {
-        let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let mut part = 0u16;
-        loop {
-            let mut buf = vec![0u8; self.chunk_bytes];
-            let mut n = 0;
-            while n < self.chunk_bytes {
-                let r = f.read(&mut buf[n..])?;
-                if r == 0 {
-                    break;
-                }
-                n += r;
-            }
-            if n == 0 {
-                break;
-            }
-            buf.truncate(n);
+    /// Stream and verify a captured file prefix in bounded parts. On failure,
+    /// the caller must abort the batch; uncommitted packs remain orphans.
+    pub fn add_snapshot(&mut self, snapshot: &FileSnapshot) -> Result<()> {
+        let mut part = 0usize;
+        snapshot.read_chunks(self.chunk_bytes, |bytes| {
             self.push_item(Item {
-                sha,
-                part,
-                bytes: buf,
+                sha: snapshot.sha,
+                part: part.try_into().context("blob has more than 65535 parts")?,
+                bytes: bytes.to_vec(),
             })?;
-            part = part
-                .checked_add(1)
-                .context("blob has more than 65535 parts")?;
-            if n < self.chunk_bytes {
-                break;
-            }
-        }
-        Ok(())
+            part += 1;
+            Ok(())
+        })
+    }
+
+    /// Add a regular file only if its captured bytes match the supplied hash.
+    pub fn add_file(&mut self, sha: Sha, path: &Path) -> Result<()> {
+        let snapshot = FileSnapshot::capture(path)?;
+        ensure!(
+            snapshot.sha == sha,
+            "source changed after its hash was computed"
+        );
+        self.add_snapshot(&snapshot)
     }
 
     fn push_item(&mut self, item: Item) -> Result<()> {
@@ -225,9 +224,21 @@ impl PackWriter {
     fn open_current(&mut self) -> Result<(u32, &mut File, &mut u64)> {
         if self.current.is_none() {
             let id = self.next_pack;
-            self.next_pack += 1;
+            self.next_pack = self
+                .next_pack
+                .checked_add(1)
+                .context("pack identifiers exhausted")?;
             let tmp = self.packs_dir.join(format!("{}.tmp", pack_name(id)));
-            let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            ensure!(
+                !self.packs_dir.join(pack_name(id)).try_exists()?,
+                "refusing to replace an existing immutable pack"
+            );
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&tmp)
+                .with_context(|| format!("create {}", tmp.display()))?;
             f.write_all(MAGIC)?;
             self.current = Some((id, f, MAGIC.len() as u64));
         }
@@ -240,7 +251,10 @@ impl PackWriter {
             f.sync_all()?;
             drop(f);
             let tmp = self.packs_dir.join(format!("{}.tmp", pack_name(id)));
-            std::fs::rename(&tmp, self.packs_dir.join(pack_name(id)))?;
+            // Publish without replacing an existing pack, even if it appeared
+            // after the initial existence check.
+            std::fs::hard_link(&tmp, self.packs_dir.join(pack_name(id)))?;
+            std::fs::remove_file(&tmp)?;
             self.packs_written.push(id);
         }
         Ok(())
@@ -248,12 +262,16 @@ impl PackWriter {
 
     /// Compress many whole blobs in parallel: groups them into chunks first, compresses the chunks with rayon, then
     /// writes sequentially. Blobs larger than CHUNK_BYTES are streamed through `add_file` instead.
-    pub fn add_many_parallel(&mut self, blobs: &[(Sha, PathBuf, u64)]) -> Result<()> {
+    pub fn add_snapshots_parallel(&mut self, blobs: &[&FileSnapshot]) -> Result<()> {
         // group into chunks by cumulative size, in the given order
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut cur: Vec<usize> = Vec::new();
         let mut acc = 0u64;
-        for (i, (_, _, size)) in blobs.iter().enumerate() {
+        for (i, blob) in blobs.iter().enumerate() {
+            let size = blob.size();
+            if size > self.chunk_bytes as u64 {
+                bail!("large snapshots must be streamed through add_file");
+            }
             if acc + size > self.chunk_bytes as u64 && !cur.is_empty() {
                 groups.push(std::mem::take(&mut cur));
                 acc = 0;
@@ -271,11 +289,10 @@ impl PackWriter {
                 .map(|g| {
                     let mut items = Vec::with_capacity(g.len());
                     for &i in g {
-                        let (sha, path, _) = &blobs[i];
-                        let bytes = std::fs::read(path)
-                            .with_context(|| format!("read {}", path.display()))?;
+                        let snapshot = blobs[i];
+                        let bytes = snapshot.read_bytes()?;
                         items.push(Item {
-                            sha: *sha,
+                            sha: snapshot.sha,
                             part: 0,
                             bytes,
                         });
@@ -291,6 +308,23 @@ impl PackWriter {
             }
         }
         Ok(())
+    }
+
+    /// Add captured small files while checking the caller's expected identities.
+    pub fn add_many_parallel(&mut self, blobs: &[(Sha, PathBuf, u64)]) -> Result<()> {
+        let snapshots = blobs
+            .iter()
+            .map(|(sha, path, size)| {
+                let snapshot = FileSnapshot::capture(path)?;
+                ensure!(
+                    snapshot.sha == *sha && snapshot.size() == *size,
+                    "source changed after its hash or size was computed: {}",
+                    path.display()
+                );
+                Ok(snapshot)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.add_snapshots_parallel(&snapshots.iter().collect::<Vec<_>>())
     }
 
     /// Flush pending data, seal the open pack, and return index rows.
@@ -322,7 +356,7 @@ fn build_chunk(items: &[Item]) -> Chunk {
 pub struct PackReader {
     packs_dir: PathBuf,
     files: HashMap<u32, File>,
-    cache: Vec<((u32, i64), Vec<u8>)>,
+    cache: Vec<((u32, i64, i32), Vec<u8>)>,
     cache_max: usize,
 }
 
@@ -354,7 +388,20 @@ impl PackReader {
 
     /// Decompressed frame at (pack, chunk_offset).
     pub fn frame(&mut self, pack: u32, chunk_offset: i64, chunk_len: i32) -> Result<&[u8]> {
-        let key = (pack, chunk_offset);
+        ensure!(
+            chunk_offset >= MAGIC.len() as i64
+                && chunk_len > 0
+                && (chunk_len as usize) <= CHUNK_BYTES * 2 + 1024,
+            "invalid compressed frame offset or length"
+        );
+        let end = (chunk_offset as u64)
+            .checked_add(chunk_len as u64)
+            .context("compressed frame extent overflow")?;
+        ensure!(
+            end <= self.file(pack)?.metadata()?.len(),
+            "compressed frame extends past its pack"
+        );
+        let key = (pack, chunk_offset, chunk_len);
         if let Some(pos) = self.cache.iter().position(|(k, _)| *k == key) {
             let entry = self.cache.remove(pos);
             self.cache.push(entry);
@@ -380,12 +427,18 @@ impl PackReader {
 
     /// Whole blob from its (ordered) parts.
     pub fn blob(&mut self, parts: &[Loc]) -> Result<Vec<u8>> {
-        let total: usize = parts.iter().map(|l| l.size as usize).sum();
-        let mut out = Vec::with_capacity(total);
+        let total = parts.iter().try_fold(0usize, |total, part| {
+            let (_, end) = checked_part_range(part)?;
+            total
+                .checked_add(end - part.offset as usize)
+                .context("blob size overflow")
+        })?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(total)
+            .context("allocate blob bytes")?;
         for l in parts {
+            let (start, end) = checked_part_range(l)?;
             let raw = self.frame(l.pack, l.chunk_offset, l.chunk_len)?;
-            let start = l.offset as usize;
-            let end = start + l.size as usize;
             if end > raw.len() {
                 bail!(
                     "index points outside frame ({}+{} > {}) in pack {}",
@@ -404,17 +457,31 @@ impl PackReader {
     pub fn copy_blob(&mut self, parts: &[Loc], w: &mut dyn Write) -> Result<u64> {
         let mut n = 0u64;
         for l in parts {
+            let (start, end) = checked_part_range(l)?;
             let raw = self.frame(l.pack, l.chunk_offset, l.chunk_len)?;
-            let start = l.offset as usize;
-            let end = start + l.size as usize;
             if end > raw.len() {
                 bail!("index points outside frame in pack {}", l.pack);
             }
             w.write_all(&raw[start..end])?;
-            n += l.size as u64;
+            n = n
+                .checked_add(l.size as u64)
+                .context("copied blob size overflow")?;
         }
         Ok(n)
     }
+}
+
+fn checked_part_range(loc: &Loc) -> Result<(usize, usize)> {
+    let start = usize::try_from(loc.offset).context("negative blob part offset")?;
+    let size = usize::try_from(loc.size).context("negative or oversized blob part length")?;
+    let end = start
+        .checked_add(size)
+        .context("blob part extent overflow")?;
+    ensure!(
+        end <= CHUNK_BYTES * 2 + 1024,
+        "blob part extends beyond the maximum decompressed frame"
+    );
+    Ok((start, end))
 }
 
 #[cfg(test)]

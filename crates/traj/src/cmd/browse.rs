@@ -59,7 +59,12 @@ pub fn ls(stores: &[String], a: LsArgs) -> Result<i32> {
     }
     if a.recursive {
         let mut dirs = vec![dir.clone()];
-        dirs.extend(st.dirs_under(&dir)?.into_iter().map(|d| d.dir));
+        dirs.extend(
+            st.dirs_under(&dir)?
+                .into_iter()
+                .map(|d| d.dir)
+                .filter(|d| *d != dir),
+        );
         for d in dirs {
             println!("{}:", if d.is_empty() { "." } else { &d });
             let (subs, files) = st.children(&d)?;
@@ -125,9 +130,17 @@ pub struct TreeArgs {
 pub fn tree(stores: &[String], a: TreeArgs) -> Result<i32> {
     let st = one_store(stores)?;
     let dir = norm(&a.dir);
+    require_directory(&st, &dir)?;
     println!("{}", if dir.is_empty() { "." } else { &dir });
     walk_tree(&st, &dir, 1, a.depth, a.dirs_only)?;
     Ok(0)
+}
+
+pub(super) fn require_directory(st: &trajfs_core::Store, dir: &str) -> Result<()> {
+    if !dir.is_empty() && st.dir_info(dir)?.is_none() {
+        bail!("{dir}: no such directory in the store");
+    }
+    Ok(())
 }
 
 fn walk_tree(
@@ -186,6 +199,7 @@ pub struct FindArgs {
 pub fn find(stores: &[String], a: FindArgs) -> Result<i32> {
     let st = one_store(stores)?;
     let dir = norm(&a.dir);
+    require_directory(&st, &dir)?;
     let name_g = a
         .name
         .as_deref()
@@ -220,6 +234,7 @@ pub fn find(stores: &[String], a: FindArgs) -> Result<i32> {
         })
         .collect::<Result<_>>()?;
     let mut n = 0;
+    let mut write_result = Ok(());
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     use std::io::Write;
@@ -229,6 +244,9 @@ pub fn find(stores: &[String], a: FindArgs) -> Result<i32> {
             && path_g.as_ref().map(|g| g.is_match(p)).unwrap_or(true)
     };
     st.scan_under(&dir, !attrs.is_empty(), pre, |r| {
+        if write_result.is_err() {
+            return;
+        }
         if let Some(k) = kind {
             if r.kind != k {
                 return;
@@ -245,14 +263,15 @@ pub fn find(stores: &[String], a: FindArgs) -> Result<i32> {
         {
             return;
         }
-        if a.long {
-            let _ = writeln!(out, "{:>12} {} {}", r.size, hex::encode(r.sha), r.path);
+        write_result = if a.long {
+            writeln!(out, "{:>12} {} {}", r.size, hex::encode(r.sha), r.path)
         } else {
-            let _ = writeln!(out, "{}", r.path);
-        }
+            writeln!(out, "{}", r.path)
+        };
         n += 1;
     })?;
-    let _ = out.flush();
+    write_result?;
+    out.flush()?;
     eprintln!("{n} paths");
     Ok(0)
 }

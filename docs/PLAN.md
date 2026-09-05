@@ -244,27 +244,33 @@ hook patterns.
 
 1. **Walk** the source tree in parallel; apply the rule profile (§4.2). Symlinks are recorded, never followed. Hard
    links are ordinary files (dedupe makes them free).
-2. **Skip already-ingested paths**: same `(size, mtime_ns)` as an existing catalog row → dropped from the batch;
-   different → re-hashed; if the sha changed the path is recorded again (newest segment wins on read; `verify` reports
-   shadowing).
-3. **Hash** every candidate (sha256, `--jobs` workers; 22 s for 2.17 M files warm in the prototype).
+2. **Compare with retained rows** after hashing: skip a path only when its content hash, kind, canonical exec mode,
+   size, mtime and adapter attributes agree. Size and mtime alone are not proof of unchanged bytes.
+3. **Hash** each regular file's captured inode-bound prefix (sha256, `--jobs` workers). Record its captured length,
+   not an older walk length. Packing and derivation verify that same prefix; appends cannot extend it, and source
+   replacement/truncation or a changed prefix aborts the batch before manifest publication.
 4. **Pack** blobs whose sha is not in any existing index, sorted by `(dir, name)` for chunk locality; frames are at
    most 1 MiB uncompressed, and packs are sealed before the next frame would exceed the artifact target; each is
-   written as `NNNN.pack.tmp` and renamed when sealed.
+   written to an exclusive-created `NNNN.pack.tmp` and published without replacing an existing pack.
 5. **Write** size-bounded `catalog/files-B[-P]`, `dirs-B[-P]`, `excluded-B[-P]`, `packs/index-B[-P]`, then
    size-bounded adapter-derived tables, then append the
    batch to `MANIFEST.json`. The serialized manifest is size-checked, written through a unique create-new/no-follow
    same-directory temporary handle, flushed and synced, then atomically renamed. Until that rename, readers and SQL
    ignore every new artifact; a crash leaves unreferenced orphans that the next `pack` safely removes.
-6. Summary line; non-zero exit if any path was unreadable (batch is still written; failures listed in the manifest).
+6. Summary line; non-zero exit for recorded walk errors. Hash/read consistency errors abort the batch instead of
+   publishing a corrupt or misleading checkpoint. Watchers propagate nonzero pack results and do not commit them.
 
-`<store>/.lock` (flock) is held for the duration of a pack; readers never lock.
+`<store>/.lock` (flock) is exclusive during a pack. Ordinary readers take a shared lock; FUSE uses the immutable
+core-artifact reader path so a long-lived mount does not prevent appending new batches.
 
 ### 4.1 Incremental use
 
 Runners that append (new round, new episode, new session) call `traj pack` again; each batch contains the new paths
 and only the blobs not seen before. Adapters that implement `batch_ready` allow `traj watch <src> --store S` to pack
 automatically.
+
+`always_keep` overrides ordinary excluded-directory names. The walker must descend such a directory when a keep
+rule could select a descendant. Explicit `always_exclude` subtree globs still take precedence and may be pruned.
 
 ### 4.2 Rules
 
