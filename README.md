@@ -1,230 +1,404 @@
-# trajfs
+# TrajFS
 
-A content-addressed store for agent run trees, with a Parquet catalog, DuckDB queries and a git-friendly on-disk
-form. One binary, `traj`, written in Rust.
+**Millions of agent files. One compact store. Still read like files.**
 
-Agent runners leave behind directory trees of millions of tiny files: per-step stdout, status markers, JSON records,
-and the same workspace snapshotted round after round. In the corpus this project was built against, the median file
-is 40 bytes and each distinct piece of content appears under 91 paths. Git stores the bytes fine but chokes on the
-paths; every reader pays the duplication again. trajfs keeps the tree browsable and queryable while git only ever
-sees a few dozen immutable files per run.
+TrajFS archives agent run directories without turning your Git repository into millions of tiny files. Keep logs,
+tool calls, reviews, and repeated workspace snapshots in a compact, deduplicated store, then browse them with
+file-like commands, query them with SQL, or open them in VS Code through a read-only mount.
 
-```
-2,140,904 paths, 12.0 GB kept   ->   23,685 distinct blobs, 454 MB of packs + 27 MB of catalog, 16 files
-pack: 55 s      verify --deep: 21 s      ls / stat / cat: 10-20 ms      find by name: 0.4 s      SQL: < 0.2 s
-```
+Built for **coding-agent runs, multi-agent experiments, and evaluation grids**. Your runner still writes ordinary
+files; TrajFS handles their archival and analysis. One Rust binary, `traj`. No database server or cloud service.
 
-## How it works
+Recorded Rust results: **2.14 million retained paths packed in 118 seconds**, with **about 481 MB of packs and
+catalogs for 12.0 GB of retained content**. That is roughly **25x less storage before optional event tables**.
+[See the workloads, timings, and measurement limits below.](#benchmarks)
 
-A store is a directory (`<run>.trajstore/`) of immutable files:
+[Why TrajFS?](#why-trajfs) | [Quick start](#quick-start) | [Benchmarks](#benchmarks) |
+[Installation](#installation) | [How it works](#how-it-works)
 
-```
-MANIFEST.json                 format, store id, source, adapter, rule profile, ingestion batches
-catalog/files-NNNN[-PPPP].parquet    path, dir, name, kind, mode, size, sha256, mtime, batch, attrs
-catalog/dirs-NNNN[-PPPP].parquet     per-directory counts and bytes
-catalog/excluded-NNNN[-PPPP].parquet what the rule profile left out, and why
-packs/NNNN.pack                       zstd frames of up to 1 MiB of concatenated blobs
-packs/index-NNNN[-PPPP].parquet      sha256 -> (pack, frame offset, frame length, offset, size, part)
-derived/<adapter>/events-NNNN[-PPPP].parquet   parsed event envelope (rebuildable)
-derived/<adapter>/events-rebuild-GGGG[-PPPP].parquet   transactional full rebuild
-```
+## Why TrajFS?
 
-- **Git-safe physical segments.** Packs, Parquet files, and the serialized manifest are capped at the lower of the
-  configured hook limit and a conservative 60 MiB target. Oversized batch tables use a `-PPPP` part suffix. The
-  `files`, `dirs`, `excluded`, and `index` tables use synchronized suffixes.
-- **Manifest publication boundary.** Readers and SQL open only artifacts declared by `MANIFEST.json`; interrupted,
-  unlisted output is invisible and removed by the next pack. Missing declarations fail store opening, and the hook
-  rejects both missing and surplus finalized artifacts. Format-1 stores remain readable; new writes upgrade them to
-  format 2 with explicit derived-file publication. Manifest replacement uses a unique, exclusive-created,
-  no-follow temporary file that is flushed and synced before rename.
-- **Content-addressed.** A path maps to a sha256; a sha256 maps to bytes in a pack. Duplicate content is stored once,
-  across rounds and across the runner's own snapshot copies.
-- **Consistent live prefixes.** Each regular file is bound to its captured inode and length. Hashing, packing,
-  and derived events use that same prefix; later appends are left for the next batch. Replacement, truncation,
-  or a changed prefix aborts publication rather than producing mismatched sizes/hashes. This is a per-file
-  checkpoint, not an atomic snapshot of a whole actively changing tree.
-- **Packs, not Parquet, for bytes.** Reading one file is a `pread` of one frame plus a decompress of at most 1 MiB,
-  a few microseconds to a few milliseconds. Parquet holds only the catalog and the derived tables.
-- **Append-only batches.** Each `traj pack` adds one batch: new paths, only the blobs not seen before, and its own
-  catalog segments. Nothing already written is modified, so every commit is additive.
-- **Transactional derivation.** `traj derive` writes a uniquely named replacement generation, atomically publishes it
-  through the manifest, and only then removes the prior generation. Readers retain a shared store lock for their
-  lifetime; pack and derive hold the exclusive lock through publication and cleanup. Readers open `.lock` read-only;
-  legacy stores without it use a shared lock on `MANIFEST.json` while the first writer bootstraps `.lock`.
-- **Safe derived paths.** Adapter names are one non-empty path component, and every resolved artifact must be a regular
-  file inside the canonical store root.
-- **Every byte is verifiable.** `traj verify --deep` re-hashes the store; `cat` checks the sha on every read.
+An agent run is rarely just one conversation. Each round can leave behind stdout, status markers, tool results,
+JSONL event streams, source trees, and another snapshot of almost the same workspace.
+
+**The headache is not just the bytes. It is the paths.** Git has to track each one, editors crawl them, and recursive
+searches reread the same content across snapshots. A compressed tarball reduces the file count, but makes it harder
+to inspect one file, compare rounds, or append new results.
+
+TrajFS separates the directory tree you want to read from the physical files you need to store:
+
+- **Keep Git manageable.** Pack many logical paths into a small set of bounded-size artifacts.
+- **Stop storing and searching duplicates.** Identical file content is stored once per store; `traj grep` searches
+  distinct content and maps matches back to every matching path.
+- **Keep familiar tools.** Use `traj ls`, `find`, `cat`, and `extract`, or mount the tree for ordinary file readers.
+- **Ask questions across runs.** Query paths, content hashes, custom attributes, and parsed events with embedded SQL.
+
+TrajFS is an archive for run evidence, not a writable replacement for your agent's working directory.
 
 ## Quick start
 
-```
-cargo build --release                       # ~4 min the first time (DuckDB is bundled); binary at target/release/traj
+[Install `traj`](#installation) first. You can pack an existing run without setting up Git integration.
+These examples use `/data/runs/run-42` and a rounds-style layout; replace the source and example file paths with yours.
 
-# pack a run tree into a store, browse it, query it
-traj pack /data/runs/run-42 --out stores/run-42.trajstore
-traj -S stores/run-42.trajstore ls -l rounds/round-0037/reviewer
-traj -S stores/run-42.trajstore find --name review.json --attr role=reviewer
-traj -S stores/run-42.trajstore cat rounds/round-0037/reviewer/review.json
-traj -S stores/run-42.trajstore grep -l -e Traceback --name '*.stdout'
-traj -S stores/run-42.trajstore sql "select attrs['round'] r, count(*) paths, count(distinct sha) blobs from files group by 1 order by r"
-traj -S stores/run-42.trajstore extract rounds/round-0037 /tmp/r37     # real files, for an editor
-traj -S stores/run-42.trajstore verify --deep
-```
+### Pack, find, and read a run
 
-Verbs: `init doctor pack watch ls tree find du stat cat extract edit grep sql derive verify commit skill hook bench mount umount`.
-`traj <verb> --help` documents each one.
+```bash
+traj pack /data/runs/run-42 --out stores/run-42.trajstore \
+  --adapter copilot-cli --rules none
 
-## Browsing in VS Code and other tools
+export TRAJ_STORE="$PWD/stores/run-42.trajstore"
 
-A store can be mounted as an ordinary read-only directory tree (FUSE, Linux; no root needed where `/dev/fuse` and
-`fusermount3` exist). VS Code, `grep -r`, `diff -r`, Python and every other tool then see normal files, served from
-the catalog and the packs with nothing extracted: a round of the 2.1 M-path reference run lists in 0.2 s the first
-time and in milliseconds after, a file opens in 2–3 ms, and a `diff -r` of a whole round against `traj extract` is
-clean in 10 s. New batches and new stores appear without remounting. Design and numbers: `docs/PLAN-fuse.md`.
-
-```
-traj mount ~/traj-mnt --daemon --save                 # every store under stores/, one directory per run; --save records
-                                                      # mount_root in trajfs.toml and writes the VS Code watcher exclude below
-code -r ~/traj-mnt                                    # or a run, or a round: VS Code settings are written for you
-traj -S stores/run-42.trajstore mount ~/mnt-42        # or one store, its tree at the mountpoint
-traj umount ~/traj-mnt
+traj ls -l
+traj tree --depth 2
+traj find --name 'review.json'
+traj cat rounds/round-0001/reviewer/review.json
+traj grep -l -e Traceback --name '*.std*'
+traj du --depth 1
+traj verify --deep
 ```
 
-VS Code needs two settings for a mount, and `traj mount` writes them for you: the mount is excluded from the file
-watcher (which otherwise crawls every workspace folder to set inotify watches: minutes on a 2 M-path tree, and it
-exhausts `max_user_watches`), and its files are marked read-only so editors show a lock instead of a failed save.
-They go into VS Code's machine-level settings on the host on every mount (Remote-SSH: `~/.vscode-server/data/Machine/settings.json`),
-so opening the mountpoint itself or any folder under it is fine; `--save` and `traj init --mount-root` also put
-them into the repo's `.vscode/settings.json`, and `--no-vscode` skips all of it:
+`TRAJ_STORE` selects the store for reading commands; `-S <store-path>` overrides it. Packing leaves the source tree
+in place. Run `pack` again with the same source and destination to append new or changed entries without rewriting
+old packs. If `pack` reports errors, do not treat the resulting store as a complete archive.
 
-```json
-{ "files.watcherExclude": { "/home/me/traj-mnt/**": true },
-  "files.readonlyInclude": { "/home/me/traj-mnt/**": true },
-  "search.followSymlinks": false }
+**Choose retention deliberately.** `--rules none` disables exclusions. The default `no-build-products` profile
+excludes common build products and caches; custom TOML rules are also supported. Exclusion records and reasons are
+available in the `excluded` SQL view. Packing does not redact secrets or private content: review what you share.
+
+The adapter affects interpretation, not whether ordinary files can be archived:
+
+| Adapter | Use it for |
+|---|---|
+| `none` | Any run tree; paths and original file contents without event parsing |
+| `copilot-cli` | Copilot CLI trajectories matching `**/events.jsonl` |
+| `claude-code` | Claude Code session files matching `**/*.jsonl` |
+| `jsonl` | Generic JSONL events; custom globs such as `--adapter 'jsonl:logs/*.jsonl'` |
+| `path/to/adapter.toml` | A runner's own layout, path attributes, parsing rules, and completion markers |
+
+Partial or malformed event lines are retained as `_unparsed` records; the stored trajectory bytes remain the
+authoritative original. See `traj <command> --help` for each command's options.
+
+### Open the archive like a directory
+
+On Linux with FUSE (Filesystem in Userspace), mount the selected store without extracting it:
+
+```bash
+traj mount "$HOME/traj-mnt/run-42" --daemon
+ls "$HOME/traj-mnt/run-42"
+code -r "$HOME/traj-mnt/run-42"          # Optional: open in VS Code
+traj umount "$HOME/traj-mnt/run-42"
 ```
 
-Memory is a best-effort target (`--memory`, default 20 % of RAM): blobs and listings are evicted and inodes handed
-back to the kernel when the estimate is over it. The mount is read-only and the kernel enforces it (editors offer "Save As"); every read is sha-verified, so a
-corrupt pack shows up as an I/O error on that file, never as wrong bytes. The mountpoint must be outside every git
-work tree (`traj mount` refuses otherwise, and `traj doctor` lists live mounts). `getfattr -d <file>` shows the
-sha, the batch and the adapter attrs as `user.traj.*` xattrs. Ctrl+Shift+F is ripgrep over the mount: fine within a
-round, slow over a run, where `traj grep` and `traj sql` remain the tools.
+The mountpoint must be empty and, by default, outside every Git worktree. Files are **read-only**; newly packed
+batches become visible without remounting. Use `--memory 2G` to set a best-effort memory target instead of the default
+20% of system RAM.
 
-## Setting up a repository
+Mounting also updates available VS Code host settings to exclude the tree from file watching and mark it read-only.
+Use `--no-vscode` to leave those settings untouched. For whole-run searches, prefer `traj grep` or `traj sql`:
+ordinary recursive tools still traverse every mounted path.
 
-trajfs enforces one structural rule: **raw run trees live outside every git work tree; the repo holds only stores.**
+For writable files, extract into a new destination outside Git:
 
-```
-cd <your repo>
-traj init --data-root /data/runs --store-root stores --adapter trajfs/adapter.toml
-traj doctor
+```bash
+traj extract rounds/round-0001 /tmp/traj-round-0001
 ```
 
-`init` writes `trajfs.toml`, a `.gitattributes` for the store directory, a catch-all `.gitignore` in the data root,
-installs the pre-commit hook (a symlink to the `traj` binary), and exports an agent skill to
-`.claude/skills/traj/SKILL.md` and `AGENTS.md`. The hook refuses commits that stage raw run paths, more than ten
-thousand new paths, files over 65 MiB, symlink/gitlink-backed store artifacts, or nested `store_root` results that are
-not complete, readable TrajFS stores. It prints the `traj pack` / `traj commit` commands to use instead. Deleting tracked raw paths stays
-allowed, so an existing repository can migrate. Policy and file sizes are read from the staged Git objects, not from
-potentially different working-tree contents.
+`traj edit <path>` opens a temporary copy in `$EDITOR` and prints a diff; it never writes back into the store.
+You do not need FUSE for any of these native CLI commands.
 
-`traj commit` commits only its selected store and leaves unrelated staged and unstaged work intact.
-`traj init` honors Git's hook location, including linked worktrees and `core.hooksPath`, and does not overwrite
-an existing store-root attributes file. Malformed, unreadable, or missing explicitly selected configuration is an
-error, not permission to fall back to different roots or retention rules. A watcher stops without committing when
-packing returns an error.
-Manual packing and watching use the same encoded data-root-relative store IDs for nested runs, so two tasks with
-the same run-directory basename do not collide. An explicit `--out` or `--id` still takes precedence.
+### Query events and compare runs
 
-Then, per run or continuously:
+With the `copilot-cli` adapter from the quick start:
 
-```
-traj pack /data/runs/run-42 --label "rounds 1-38"     # store path comes from trajfs.toml
-traj commit --push stores/run-42.trajstore            # stages only the new batch files
-traj watch --commit --push                            # packs whenever the adapter reports a batch ready
+```bash
+traj sql "
+  SELECT tool_name, count(*) AS calls
+  FROM events
+  WHERE type = 'tool.execution_complete'
+  GROUP BY tool_name
+  ORDER BY calls DESC"
 ```
 
-## Adapters: the target repository describes its own layout
+After packing another run, repeat `-S` to query both stores:
 
-trajfs knows nothing about any particular runner. It ships three trajectory formats (`copilot-cli`, `claude-code`,
-generic `jsonl`) and two rule profiles (`none`, `no-build-products`). Everything about a runner's tree is a TOML file
-kept in that runner's repository:
+```bash
+traj -S stores/run-42.trajstore -S stores/run-43.trajstore sql "
+  SELECT store, count(*) AS recorded_paths, count(DISTINCT sha) AS distinct_contents
+  FROM files
+  GROUP BY store
+  ORDER BY store"
+```
+
+SQL exposes `files`, `dirs`, `excluded`, `blobs` (the pack index), and `events` when derived.
+`text(sha)` and `blob(sha)` read stored content from queries; `--csv` produces CSV output.
+
+Catalog SQL views include published batch history, not just the latest version of each path. File-like commands and
+mounts resolve the latest compatible file/directory namespace. Incremental event tables parse complete changed
+trajectories, so growing logs can repeat earlier events across batches. `traj derive --adapter <name-or-TOML>`
+rebuilds events from the latest retained trajectories; `pack --no-derive` and `watch --no-derive` let you defer parsing.
+
+### Automate archival and commit stores, not raw trees
+
+For a Git-backed experiment repository, keep two separate roots. This example uses a different run root and store
+from the quick start:
+
+```text
+/data/experiment-runs/      Raw run trees, outside every Git worktree
+<experiment-repo>/stores/   Packed stores, the form you commit
+```
+
+Automatic watching needs an adapter that defines **when a batch is ready**. Built-in format adapters only parse
+events; they do not know your runner's completion markers. Choose the adapter before the first pack: appending with
+a different adapter name is rejected, so use a new store when switching from `copilot-cli` to `my-runner`.
+
+<details>
+<summary>Example: save a rounds-style adapter as <code>trajfs/adapter.toml</code> in your experiment repository</summary>
 
 ```toml
-# trajfs/adapter.toml
 name = "my-runner"
-rules = "rules.toml"                          # what to leave out (build products, bulk measurement dumps, ...)
-[[attrs]]                                     # named groups become files.attrs keys
-pattern = '^rounds/round-(?P<round>\d+)/(?P<role>[^/]+)(?:/|$)'
+rules = "none"
+
+[[attrs]]
+pattern = '^rounds/round-(?P<round>\d+)/(?P<role>[^/]+)/'
 strip_leading_zeros = ["round"]
+
 [trajectories]
 globs = ["**/events.jsonl"]
 format = "copilot-cli"
-[batch_ready]                                 # for `traj watch`
-run_glob = "*/*/run-*"
+
+[batch_ready]
+run_glob = "run-*"
 markers = ["rounds/round-*/DONE"]
-[hook]                                        # copied into trajfs.toml by `traj init`
+label_ancestor_pattern = '^round-\d+$'
+
+[hook]
 raw_patterns = ['(^|/)rounds/round-\d+/']
 ```
 
-`traj init --scaffold-adapter` writes the templates for the repository's maintainers or its agent to complete; on a
-terminal `init` asks whether to do so. The exported skill explains the file to agents working in that repo.
+Named regex groups become `files.attrs` keys, such as `round` and `role`. Adjust the event format, directory layout,
+and completion markers to your runner. A marker triggers packing of the run tree; it does not restrict the batch to
+that round's directory.
 
-## SQL
+</details>
 
-`traj sql` opens an embedded DuckDB over the store's Parquet files: views `files`, `dirs`, `excluded`, `blobs` (the
-pack index) and `events` (when derived), plus `text(sha)` and `blob(sha)` to reach content from a query. Several
-`-S` stores register together with a `store` column. The Parquet files are plain and readable by any other tool.
-Content functions resolve hashes across all registered stores and verify returned bytes. An unknown or malformed
-hash returns NULL; corrupted or unreadable stored content raises an error instead. Each SQL connection owns its
-store bindings and releases their locks when it closes.
+From that experiment repository, initialize the integration and commit its configuration once:
 
-These SQL views expose the published batch history, including older versions of a path. Filesystem-style
-`stat`, browse, extract, grep, and mount operations instead resolve the latest compatible file/directory namespace.
-Adapter partial records preserve invalid UTF-8 as a JSON `bytes` array, rather than irreversibly replacing bytes.
-The outer trajectory blob remains the authoritative original stream.
+```bash
+traj init --data-root /data/experiment-runs --store-root stores \
+  --adapter trajfs/adapter.toml --rules none
+traj doctor
 
-```
-traj -S S sql "select tool_name, count(*) from events where type='tool.execution_complete' group by 1 order by 2 desc"
-traj -S S sql "select path, json_extract_string(text(sha),'$.verdict') from files where name='review.json'"
+git add trajfs.toml trajfs/adapter.toml stores/.gitattributes stores/.gitkeep \
+  .claude/skills/traj/SKILL.md AGENTS.md
+git commit -m "Set up TrajFS"
 ```
 
-## Testing
+`init` writes the configuration, store attributes, a Git pre-commit hook, and agent instructions. It respects Git's
+hook location and refuses to replace an unrelated hook unless explicitly requested. Using `--scaffold-adapter`
+instead of `--adapter` generates editable templates; review their retention rules before packing, including the
+scaffolded rule template's 20 MiB file-size cutoff.
 
-```
-cargo test --release                                            # format, round trips (proptest),
-                                                                # integrity, catalog verbs vs ls/find/du, grep vs grep,
-                                                                # events, SIGKILL recovery, watch, hook, skill examples,
-                                                                # the FUSE mount (T10, skipped without /dev/fuse)
-TRAJ_SLOW_SRC=<run dir> TRAJ_SLOW_ADAPTER=<adapter.toml> \
-  cargo test --release --features slow -p traj --test cli slow::   # a real round and a whole run, with size and latency bounds
-TRAJ_SLOW_STORE=<store dir> \
-  cargo test --release --features slow -p traj --test cli t10k     # the mount against a real store, with latency and RSS bounds
-cargo bench -p traj                                              # criterion latency of the hot verbs
-traj bench -S S --out review-bench/history/                 # regression baseline as JSON
-```
+With a Git remote configured, archive manually or watch for completed rounds:
 
-No shell or Python anywhere in the build, hooks or tests; external checks spawn `zstd`, `grep`, `ls`, `find`, `du`
-and the DuckDB CLI directly.
+```bash
+traj pack /data/experiment-runs/run-1 --label round-0001 &&
+  traj commit --push stores/run-1.trajstore
 
-## Repository layout
-
-```
-crates/trajfs-core       walk + rules, hashing, packs, Parquet catalog, manifest, store reader, ingest
-crates/trajfs-adapters   copilot-cli / claude-code / jsonl parsers; the TOML-declared adapter
-crates/traj              the CLI (hook, watch, skill export, bench, the FUSE mount included)
-rules/                   built-in rule profiles
-skills/traj/SKILL.md     agent skill template, embedded in the binary
-docs/PLAN.md             design and test plan, with measured status (§14, §15)
-docs/idea-review.md      the evaluation that chose this design over tar+FUSE, with the benchmark
-docs/idea.md             the original notes
-docs/PLAN-fuse.md        the read-only FUSE mount: design, measurements (§16); docs/vscode-viewer.md records why a mount was chosen over an editor plugin
-review-bench/            the prototype scripts and numbers from the review (historical)
+# Or keep packing and committing when new completion markers appear:
+traj watch --commit --push
 ```
 
-## Status
+`traj commit` commits only the selected store, preserving unrelated staged and unstaged work. The hook checks staged
+Git content, rejecting configured raw-run paths, incomplete stores, and oversized artifacts. Defaults allow at most
+10,000 added paths per commit and 65 MiB per file. `traj hook check-tree HEAD` checks a committed tree.
 
-Current writes use format 2 and readers remain compatible with format 1. The design, the CLI and the test plan in
-`docs/PLAN.md` are implemented; measurements in §14 and §15 come from a 2.1 M-path, 12 GB run. Open items: DuckDB-backed full-catalog
-scans (find by attribute is ~1 s on 2 M rows), `traj compact`, and the runner-side output-root guard described in
-§6.1.
+For nested runs, store IDs encode the data-root-relative path so matching basenames do not collide. In a configured
+repository, `traj mount <mountpoint>` without a store selection mounts all stores under `store_root`; unset
+`TRAJ_STORE` first if you exported it above. Add `--save` to remember the mountpoint and write repository-level
+VS Code settings.
+
+## Benchmarks
+
+These are **previously recorded measurements**, not reruns against the latest refactors. Results depend on retention
+rules, duplication, hardware, and cache state; storage reduction is not a runtime speedup. The saved Rust report does
+not include a complete hardware/software inventory or confidence intervals.
+
+### Four-lane experiment: recorded Rust results
+
+The [Rust implementation report, section 14](docs/PLAN.md) records these results from the `onesw` fourth-grid agent
+experiment on **2026-09-04**. Three lanes were measured; **rank 2 ran on another host and was not measured**.
+
+| Lane / recorded label | Retained paths | Retained content | Packs + catalog | Pack | Deep verify |
+|---|---:|---:|---:|---:|---:|
+| Rank 1: `claude-opus-4.8` | 2,140,904 | 12.0 GB | ~481 MB | 118 s | 21 s |
+| Rank 2: another host | Not measured | -- | -- | -- | -- |
+| Rank 3: `claude-opus-4.6-1m` | 1,868,148 | 5.9 GB | ~451 MB | 75 s | 16 s |
+| Rank 4: `gpt-5.5-GLihDpe` | 699,040 | 4.7 GB | ~362 MB | 55 s | 13 s |
+
+The table uses the report's rounded MB/GB units. Packs + catalog **exclude optional derived events**, which add
+359 MB, 251 MB, and 269 MB for ranks 1, 3, and 4 respectively. Use `--no-derive` when you only need the core archive.
+
+The core stores are roughly **13-25x smaller than the retained content**. This comparison starts **after retention
+filtering**; discarded build products are not counted as compression savings. Rank 1 records **23,685 distinct
+blobs** and **at most 20 non-derived store files** instead of over two million logical paths.
+
+For a smaller unit of work, rank 1's **round 37** contained **105,940 retained paths / 450 MB**, packed into about
+**18.6 MB in 3.1 s**. That round is a sample of rank 1, not a fourth measured lane.
+
+### Reading and querying the million-path store
+
+The same report records these **warm-cache, whole-process** timings on rank 1:
+
+| Task | Recorded time |
+|---|---:|
+| List one directory | 70 ms |
+| `stat` or `cat` one file | 40 ms |
+| Find `COMPLETE` by filename, about 133,000 hits | 430 ms |
+| SQL file counts/bytes grouped by round | 180 ms |
+| SQL tool-call counts over 3.9 million event rows | 70 ms |
+| SQL `text(sha)` on 76 review records | 800 ms |
+
+Separate reference-round measurements after lookup tuning reported **10-20 ms listings** and **about 10 ms
+whole-process point reads**; see section 15 of the same report.
+
+The [Linux FUSE measurements](docs/PLAN-fuse.md) recorded **3 ms cold / 2 ms warm** to read a 6 KB file. But recursive
+round listing took **1.8 s cold through the mount versus 0.31 s on native files**. The mount preserves file-tool
+compatibility, not a promise that every recursive operation is faster.
+
+<details>
+<summary>Earlier million-file prototype and raw benchmark records</summary>
+
+The [historical prototype result](review-bench/fullrun.json) records **2,173,703 regular files**, totaling
+**12,928,153,598 retained bytes**, stored in **472,254,625 bytes across 13 files**: about **27.4x smaller**.
+It used content-addressed Parquet containing the blob bytes, not the current Rust zstd-pack format.
+
+Its retention rules and counted file types differ from the later Rust runs, so the two sets of results should not
+be mixed. The [one-round raw measurements](review-bench/bench.json), [prototype scripts](review-bench/), and
+[approach comparison](docs/idea-review.md) preserve the earlier tar/Parquet investigation and its limitations.
+
+</details>
+
+### Measure your own workload
+
+Prepare a store with explicit retention and adapter settings, then record timings:
+
+```bash
+mkdir -p review-bench/history
+traj -S stores/run-42.trajstore bench \
+  --ls-dir rounds/round-0001 \
+  --file rounds/round-0001/reviewer/review.json \
+  --find-name review.json \
+  --out review-bench/history/
+```
+
+`traj bench` writes timestamped JSON into an existing output directory. It is a convenience timing report, not a
+controlled comparison or correctness gate: confirm the individual commands succeed, compare repeated runs with
+the same rules and cache conditions, and use `traj verify --deep` separately.
+Its `verify_s` measures ordinary verification. On incremental stores, JSON path/blob counts describe the last batch,
+while `store_bytes` includes the whole store, including derived tables.
+
+## Installation
+
+The documented setup targets **Linux**. Install a current stable Rust toolchain with
+[rustup](https://rustup.rs/) and a C/C++ build toolchain. DuckDB is bundled in the default build; there is no separate
+database service to install.
+
+On Debian or Ubuntu, system prerequisites are:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config
+
+# Optional, only for read-only filesystem mounts:
+sudo apt-get install -y fuse3
+```
+
+Build and install from this repository:
+
+```bash
+git clone https://github.com/jingliu9/TrajFS.git
+cd TrajFS
+cargo install --locked --path crates/traj
+traj --help
+```
+
+Cargo installs `traj` into `~/.cargo/bin` by default; ensure it is on `PATH`. The first build includes the bundled
+DuckDB C++ library and can take several minutes.
+
+Default features enable SQL and Linux FUSE mounting. For a smaller build with **neither SQL nor mounting**:
+
+```bash
+cargo install --locked --path crates/traj --no-default-features
+```
+
+Mounting requires access to `/dev/fuse` and a working `fusermount3` helper; containers and restricted hosts may not
+provide them. Packing, browsing, querying, and extraction work without mounting. Native Windows builds are not
+supported by the current Unix filesystem implementation.
+
+## How it works
+
+TrajFS stores file content separately from the paths that refer to it. A SHA-256 hash identifies a file's bytes;
+identical contents share storage even when they appear under different paths or in different batches of a store.
+
+| Layer | Technology and purpose |
+|---|---|
+| CLI and ingestion | Rust, Clap, and Rayon for commands and parallel hashing/compression |
+| File content | SHA-256-addressed blobs in Zstandard-compressed packs |
+| Catalog and events | Apache Arrow / Parquet for paths, metadata, exclusions, indexes, and parsed events |
+| Queries | Embedded DuckDB over the published Parquet files |
+| File access | Optional Linux FUSE through `fuser`; no full extraction required |
+| Runner integration | TOML adapters and retention rules, Git hooks, and exported agent instructions |
+
+A store is a portable directory:
+
+```text
+run-42.trajstore/
+  MANIFEST.json                Published batches and artifact inventory
+  catalog/*.parquet            Paths, directory summaries, exclusions
+  packs/*.pack                 Compressed content
+  packs/index-*.parquet        Hash-to-pack locations
+  derived/<adapter>/*.parquet  Rebuildable event tables
+```
+
+Small-file reads decompress their containing frame, rather than an entire archive. New batches add catalog
+segments and previously unseen content. Generated artifacts are bounded by the smaller of the configured hook
+limit and 60 MiB; large tables and content are split into physical segments.
+
+### Reliability and scope
+
+- **Published snapshots, not half-written batches.** Readers use the manifest's declared artifacts. Interrupted,
+  unpublished output is ignored and cleaned up by the next pack; event rebuilds publish replacement generations.
+- **Integrity, not encryption.** `cat`, `grep`, `extract`, mounts, and SQL content functions verify hashes by default;
+  `verify --deep` re-hashes stored blobs. Keep private run data private, even when its packed representation is small.
+- **Live runs are per-file checkpoints.** Ingestion binds each file to a captured inode and byte prefix. It does not
+  produce an atomic snapshot of an entire changing run; pause the runner when you need that guarantee.
+- **Append-oriented history.** Removed source paths and newly excluded files are not purged from existing archives.
+  There is no in-place editing or `traj compact` command.
+- **Files, not full backup metadata.** Supported entries are regular files, empty files, and symlink targets under
+  UTF-8 paths. Regular-file modes normalize to 0644/0755 according to executable bits. Empty directories, ownership,
+  ACLs, original xattrs, and special files are not preserved; `extract --mtime` restores recorded file timestamps.
+
+Mount memory is a best-effort target, not a hard process-memory cap. Very large file reads and trajectory parsing
+can materialize whole blobs. Bounded artifact sizes do not remove a Git host's total repository-size limits.
+
+New stores use format 2; readers also support format 1. See [the storage design](docs/PLAN.md) and
+[the mount design](docs/PLAN-fuse.md) for the detailed contracts and limitations.
+
+## Development
+
+The workspace has three crates: [`trajfs-core`](crates/trajfs-core) for storage and ingestion,
+[`trajfs-adapters`](crates/trajfs-adapters) for event parsers and declarative adapters, and
+[`traj`](crates/traj) for the CLI, SQL, Git integration, and mounts.
+
+```bash
+cargo test --locked --release
+cargo bench --locked -p traj
+```
+
+Coverage includes property-based round trips, corruption handling, consistent live-file prefixes, interrupted writes,
+incremental history, staged Git policy, SQL content access, adapters, and read-only mounts. FUSE integration cases
+skip when the host lacks FUSE; real-dataset cases are opt-in through the `slow` feature and environment variables
+documented in [the test plan](docs/PLAN.md).
+
+Further reading: [design and test plan](docs/PLAN.md), [storage approach comparison](docs/idea-review.md),
+[FUSE design and measurements](docs/PLAN-fuse.md), and [why a mount instead of an editor extension](docs/vscode-viewer.md).
