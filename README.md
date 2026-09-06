@@ -65,6 +65,8 @@ The adapter affects interpretation, not whether ordinary files can be archived:
 |---|---|
 | `none` | Any run tree; paths and original file contents without event parsing |
 | `copilot-cli` | Copilot CLI trajectories matching `**/events.jsonl` |
+| `codex-cli` | Native `codex exec --json` streams matching `**/events.jsonl` |
+| `auto` | Select Copilot, Codex, Claude Code or generic JSONL once per matching `**/events.jsonl` stream |
 | `claude-code` | Claude Code session files matching `**/*.jsonl` |
 | `jsonl` | Generic JSONL events; custom globs such as `--adapter 'jsonl:logs/*.jsonl'` |
 | `path/to/adapter.toml` | A runner's own layout, path attributes, parsing rules, and completion markers |
@@ -169,6 +171,16 @@ label_ancestor_pattern = '^round-\d+$'
 [hook]
 raw_patterns = ['(^|/)rounds/round-\d+/']
 ```
+
+For a tree containing both Copilot and native Codex calls, explicitly set
+`format = "auto"` and increment the declared adapter version. Detection uses
+native event headers and falls back to generic JSONL for unknown streams.
+Malformed lines remain `_unparsed` events. Codex events retain the complete
+native JSON record, item/thread identities, tool type and exit code; usage
+keeps its native cumulative semantics. Only declare one canonical stream
+per call: do not also match copied rollouts or normalized telemetry. Existing
+packed bytes and derived tables remain unchanged until an explicit pack or
+`traj derive --adapter ...` operation.
 
 Named regex groups become `files.attrs` keys, such as `round` and `role`. Adjust the event format, directory layout,
 and completion markers to your runner. Despite its name, `run_glob` here selects task directories such as `task-1`.

@@ -38,7 +38,7 @@ pub struct AttrRule {
 #[derive(Deserialize, Debug, Default)]
 pub struct Trajectories {
     pub globs: Vec<String>,
-    /// copilot-cli | claude-code | jsonl
+    /// copilot-cli | codex-cli | claude-code | jsonl | auto
     pub format: String,
 }
 
@@ -69,9 +69,11 @@ pub type Parser = fn(&[u8]) -> Vec<Event>;
 pub fn parser_for(format: &str) -> Result<Parser> {
     Ok(match format {
         "copilot-cli" => crate::copilot_cli::parse,
+        "codex-cli" => crate::codex_cli::parse,
+        "auto" => crate::auto::parse,
         "claude-code" => crate::claude_code::parse,
         "jsonl" => crate::jsonl::parse,
-        other => bail!("unknown trajectory format '{other}' (copilot-cli, claude-code, jsonl)"),
+        other => bail!("unknown trajectory format '{other}' (copilot-cli, codex-cli, claude-code, jsonl, auto)"),
     })
 }
 
@@ -268,7 +270,7 @@ rules = "rules.toml"
 # pattern = '^episodes/(?P<episode>\d+)/(?P<stage>[^/]+)(?:/|$)'
 # strip_leading_zeros = ["episode"]
 
-# which blobs are trajectories and how to split them into events (copilot-cli | claude-code | jsonl)
+# which blobs are trajectories and how to split them into events (copilot-cli | codex-cli | claude-code | jsonl | auto)
 # [trajectories]
 # globs = ["**/events.jsonl"]
 # format = "jsonl"

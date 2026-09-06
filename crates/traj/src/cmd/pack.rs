@@ -12,7 +12,7 @@ pub struct PackArgs {
     /// Destination store directory (default: encoded data-root-relative run id under store_root)
     #[arg(long = "out", alias = "into")]
     pub out: Option<PathBuf>,
-    /// Adapter: built-in (none, jsonl[:globs], copilot-cli, claude-code) or a path to an adapter TOML (default: trajfs.toml)
+    /// Adapter: built-in (none, jsonl[:globs], copilot-cli, codex-cli, claude-code, auto) or a path to an adapter TOML (default: trajfs.toml)
     #[arg(long)]
     pub adapter: Option<String>,
     /// Rule profile: none | no-build-products | <file.toml> (default: the adapter's, else trajfs.toml)

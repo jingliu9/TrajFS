@@ -664,6 +664,87 @@ fn t5c_other_formats_and_rederive() {
 }
 
 #[test]
+fn mixed_codex_and_copilot_pack_and_explicit_derive_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("mixed");
+    let store = temp.path().join("mixed.store");
+    let adapter = temp.path().join("mixed.toml");
+    fs::write(
+        &adapter,
+        "name='mixed'\nversion=2\n[trajectories]\nglobs=['**/events.jsonl']\nformat='auto'\n",
+    )
+    .unwrap();
+    let copilot =
+        b"{\"type\":\"tool.execution_complete\",\"data\":{\"toolName\":\"bash\",\"exitCode\":1}}\n";
+    let codex = b"{\"type\":\"thread.started\",\"thread_id\":\"root\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"command_execution\",\"exit_code\":7}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":3}}\n";
+    write(&src.join("copilot/events.jsonl"), copilot);
+    write(&src.join("codex/events.jsonl"), codex);
+    write(
+        &src.join("codex/model-events.jsonl"),
+        b"{\"event\":\"codex.api_request\"}\n",
+    );
+    write(&src.join("codex/codex-rollouts/thread.jsonl"), codex);
+    traj()
+        .arg("pack")
+        .arg(&src)
+        .arg("--out")
+        .arg(&store)
+        .arg("--adapter")
+        .arg(&adapter)
+        .args(["--rules", "none"])
+        .assert()
+        .success();
+    for derive in [false, true] {
+        if derive {
+            traj()
+                .arg("-S")
+                .arg(&store)
+                .arg("derive")
+                .arg("--adapter")
+                .arg(&adapter)
+                .assert()
+                .success();
+        }
+        let rows = traj_lines(
+            &store,
+            &[
+                "sql",
+                "--csv",
+                "select count(*) n, count(distinct trajectory) trajectories from events",
+            ],
+        );
+        assert!(rows.iter().any(|row| row == "4,2"), "{rows:?}");
+        let tools = traj_lines(
+            &store,
+            &[
+                "sql",
+                "--csv",
+                "select tool_name, exit_code from events where exit_code is not null",
+            ],
+        );
+        assert!(tools.iter().any(|row| row == "bash,1"), "{tools:?}");
+        assert!(
+            tools.iter().any(|row| row == "command_execution,7"),
+            "{tools:?}"
+        );
+        traj()
+            .arg("-S")
+            .arg(&store)
+            .args(["verify", "--deep"])
+            .assert()
+            .success();
+    }
+    let output = traj()
+        .arg("-S")
+        .arg(&store)
+        .args(["cat", "codex/events.jsonl"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, codex);
+}
+
+#[test]
 fn derive_failure_keeps_the_previous_generation_published() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");

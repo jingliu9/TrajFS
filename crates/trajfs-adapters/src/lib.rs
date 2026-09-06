@@ -5,13 +5,22 @@ use std::path::Path;
 use trajfs_core::events::Event;
 use trajfs_core::Adapter;
 
+pub mod auto;
 pub mod claude_code;
+pub mod codex_cli;
 pub mod copilot_cli;
 pub mod declared;
 pub mod jsonl;
 
 /// Built-in, layout-free adapters (format parsers only).
-pub const BUILTIN: &[&str] = &["none", "jsonl", "copilot-cli", "claude-code"];
+pub const BUILTIN: &[&str] = &[
+    "none",
+    "jsonl",
+    "copilot-cli",
+    "codex-cli",
+    "claude-code",
+    "auto",
+];
 
 /// Resolve an adapter: a built-in name, `jsonl:<globs>`, or a path to an adapter TOML file
 /// (relative paths are taken from `base` when given).
@@ -39,6 +48,16 @@ pub fn resolve(spec: &str, base: Option<&Path>) -> anyhow::Result<Box<dyn Adapte
             name: "copilot-cli",
             globs: globset_of(&["**/events.jsonl"])?,
             parser: copilot_cli::parse,
+        }),
+        "codex-cli" => Box::new(FormatOnly {
+            name: "codex-cli",
+            globs: globset_of(&["**/events.jsonl"])?,
+            parser: codex_cli::parse,
+        }),
+        "auto" => Box::new(FormatOnly {
+            name: "auto",
+            globs: globset_of(&["**/events.jsonl"])?,
+            parser: auto::parse,
         }),
         "claude-code" => Box::new(FormatOnly {
             name: "claude-code",
@@ -216,6 +235,8 @@ mod tests {
             jsonl::parse as fn(&[u8]) -> Vec<Event>,
             copilot_cli::parse,
             claude_code::parse,
+            codex_cli::parse,
+            auto::parse,
         ] {
             let valid_partial = b"{\"text\":\"unfinished\r";
             let events = parser(valid_partial);
