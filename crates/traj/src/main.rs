@@ -56,6 +56,8 @@ enum Cmd {
     Sql(cmd::sql::SqlArgs),
     /// (Re)build derived tables from packs
     Derive(cmd::derive::DeriveArgs),
+    /// Remove one path (file or subtree) from every batch; dry run unless --yes
+    Delete(cmd::delete::DeleteArgs),
     /// Consistency check; --deep re-hashes every blob
     Verify(cmd::verify::VerifyArgs),
     /// Stage the store's new files, commit, optionally push
@@ -116,6 +118,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Grep(a) => cmd::grep::run(&stores, a),
         Cmd::Sql(a) => cmd::sql::run(&stores, a),
         Cmd::Derive(a) => cmd::derive::run(&stores, a),
+        Cmd::Delete(a) => cmd::delete::run(&stores, a),
         Cmd::Verify(a) => cmd::verify::run(&stores, a),
         Cmd::Commit(a) => cmd::commit::run(a),
         Cmd::Skill(a) => cmd::skill::run(a),

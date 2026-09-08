@@ -160,7 +160,8 @@ it beats plain chunks by ≥ 20 %.
               "source_tree_sha256": "...", "errors": []}]}
 ```
 
-Format 2 makes every derived artifact manifest-authoritative. Readers remain compatible with format-1 stores,
+Format 3 (2026-09-06) adds an optional `deleted` list: paths removed by `traj delete`, which `pack` skips from then
+on; the deletion protocol is in `tasks/PLAN-deletion.md`. Format 2 makes every derived artifact manifest-authoritative. Readers remain compatible with format-1 stores,
 including the legacy `derived/<adapter>/events-0000.parquet` full-rebuild convention. `adapter` may be
 `{"name": "none"}`; every verb in §5 works without one.
 
@@ -295,6 +296,7 @@ All verbs take `--store <dir>` (or `TRAJ_STORE`) and a path relative to the stor
 | `traj grep [-e re]... [--name g] [--path prefix] [-l] [-c] [-a]` | regex over each distinct blob once, hits mapped to every path | index + packs |
 | `traj sql "<query>"` | DuckDB with views `files`, `dirs`, `blobs` (index), `excluded`, every `derived/*` table, and functions `blob(sha) → BLOB`, `text(sha) → VARCHAR` | all |
 | `traj derive [--adapter A] [--force]` | (re)build derived tables from packs | packs → derived |
+| `traj delete <path> [--yes] [--recover]` | remove one file or subtree from every batch: rebuild, deep-verify, atomic swap (`tasks/PLAN-deletion.md`) | store → store |
 | `traj verify [--deep]` | catalog ↔ index ↔ packs consistency; `--deep` re-hashes every blob | all |
 | `traj edit <path>` | extract to a temp file, run `$EDITOR`, print a diff; never written back | |
 | `traj mount [-S S]... <mnt> [--daemon]` | read-only FUSE tree of one store, or one directory per store under `store_root`; new batches and stores appear without remounting (`PLAN-fuse.md`) | catalog + packs |
@@ -542,8 +544,9 @@ traj edit    -S ... rounds/round-0037/reviewer/review.json     # temp copy in $E
 Nothing in 12.4–12.5 needs the raw tree, so a fresh clone of the repo is enough on any machine.
 
 **12.6 What is deliberately impossible.** Committing raw run trees (hook + roots, §6.1); modifying stored content
-(append-only; `edit` never writes back); deleting a store batch by accident (`compact` is the only deleting verb and
-requires `--yes`); nesting the roots.
+(append-only; `edit` never writes back); deleting by accident (`delete` is the only deleting verb: it is a dry run
+unless `--yes` is given, refuses an uncommitted or mounted store, and never modifies the store in place, see
+`tasks/PLAN-deletion.md`); nesting the roots.
 
 ## 13. Agent skill
 

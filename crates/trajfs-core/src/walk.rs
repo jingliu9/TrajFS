@@ -16,11 +16,23 @@ pub struct Candidate {
     pub mtime_ns: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Excluded {
     pub rel: String,
     pub size: u64,
-    pub rule: &'static str,
+    pub rule: std::borrow::Cow<'static, str>,
+}
+
+/// Rule name recorded for source entries at or below a path removed by `traj delete`.
+pub const DELETED_RULE: &str = "deleted";
+
+/// Is `path` equal to `prefix` or below it? An empty prefix matches everything.
+pub fn is_under(path: &str, prefix: &str) -> bool {
+    prefix.is_empty()
+        || path == prefix
+        || (path.len() > prefix.len()
+            && path.starts_with(prefix)
+            && path.as_bytes()[prefix.len()] == b'/')
 }
 
 pub struct WalkResult {
@@ -40,6 +52,17 @@ fn is_elf(path: &Path) -> bool {
 
 /// Walk `root`, never following symlinks, never descending into `skip` (absolute paths, e.g. a store inside the tree).
 pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> {
+    walk_with_deleted(root, rules, skip, &[])
+}
+
+/// `walk`, additionally leaving out every entry at or below a `deleted` relative path
+/// (recorded once per pruned directory, or per file, with rule `deleted`), whatever the rules say.
+pub fn walk_with_deleted(
+    root: &Path,
+    rules: &Rules,
+    skip: &[PathBuf],
+    deleted: &[String],
+) -> Result<WalkResult> {
     let root = root
         .canonicalize()
         .with_context(|| format!("source {}", root.display()))?;
@@ -61,7 +84,12 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
                 continue;
             }
             let rel = entry.path().strip_prefix(&root).unwrap().to_string_lossy();
-            if let Some(rule) = rules.prune_directory(&rel) {
+            let rule = if deleted.iter().any(|d| is_under(&rel, d)) {
+                Some(DELETED_RULE)
+            } else {
+                rules.prune_directory(&rel)
+            };
+            if let Some(rule) = rule {
                 // the whole subtree is left out; recorded once as a directory row
                 let rel = entry
                     .path()
@@ -69,7 +97,11 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
                     .unwrap()
                     .to_string_lossy()
                     .to_string();
-                excluded.push(Excluded { rel, size: 0, rule });
+                excluded.push(Excluded {
+                    rel,
+                    size: 0,
+                    rule: rule.into(),
+                });
                 it.skip_current_dir();
                 continue;
             }
@@ -113,11 +145,19 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
             excluded.push(Excluded {
                 rel,
                 size: 0,
-                rule: "special-file",
+                rule: "special-file".into(),
             });
             continue;
         };
         let abs = entry.path().to_path_buf();
+        if deleted.iter().any(|d| is_under(&rel, d)) {
+            excluded.push(Excluded {
+                rel,
+                size,
+                rule: DELETED_RULE.into(),
+            });
+            continue;
+        }
         match rules.decide(&rel, size, kind == Kind::Symlink, &|| is_elf(&abs)) {
             Decision::Keep => kept.push(Candidate {
                 rel,
@@ -127,7 +167,11 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
                 size,
                 mtime_ns: md.mtime() * 1_000_000_000 + md.mtime_nsec(),
             }),
-            Decision::Exclude(rule) => excluded.push(Excluded { rel, size, rule }),
+            Decision::Exclude(rule) => excluded.push(Excluded {
+                rel,
+                size,
+                rule: rule.into(),
+            }),
         }
     }
     kept.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));

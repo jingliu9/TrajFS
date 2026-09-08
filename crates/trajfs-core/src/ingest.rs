@@ -5,12 +5,12 @@ use crate::catalog;
 use crate::events::SegmentedEventsWriter;
 use crate::hash::{sha_of_bytes, FileSnapshot};
 use crate::manifest::{
-    artifact_path_cmp, remove_manifest_temps, resolve_store_artifact, validate_adapter_name,
-    AdapterInfo, Batch, Manifest, RulesInfo,
+    artifact_path_cmp, remove_manifest_temps, resolve_store_artifact, sync_dir,
+    validate_adapter_name, AdapterInfo, Batch, Manifest, RulesInfo,
 };
 use crate::pack::PackWriter;
 use crate::rules::Rules;
-use crate::walk::{walk, Candidate};
+use crate::walk::{walk_with_deleted, Candidate};
 use crate::{FileRow, Kind, Sha, ARTIFACT_TARGET_BYTES, FORMAT_VERSION};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -164,6 +164,12 @@ pub fn ingest_with_max_artifact_bytes(
             store.display()
         );
     }
+    if let Some(pending) = crate::delete::pending(&store) {
+        bail!(
+            "a deletion of this store was interrupted ({} exists); run `traj delete --recover` first",
+            pending.display()
+        );
+    }
     let _lock = crate::store::lock_store_exclusive(&store).with_context(|| {
         format!(
             "another traj command holds {}",
@@ -190,6 +196,7 @@ pub fn ingest_with_max_artifact_bytes(
                 version: opts.rules.file.version,
             },
             batches: Vec::new(),
+            deleted: Vec::new(),
         },
         Err(e) => return Err(e),
     };
@@ -220,7 +227,8 @@ pub fn ingest_with_max_artifact_bytes(
     } else {
         vec![]
     };
-    let w = walk(&src, &opts.rules, &skip)?;
+    let deleted: Vec<String> = manifest.deleted.iter().map(|d| d.path.clone()).collect();
+    let w = walk_with_deleted(&src, &opts.rules, &skip, &deleted)?;
     let errors = w.errors.clone();
 
     // Reuse blobs, but do not treat size/mtime as proof of unchanged content:
@@ -417,7 +425,12 @@ pub fn ingest_with_max_artifact_bytes(
         }
     }
 
-    // 7. manifest
+    // 7. manifest: artifacts are durable before the manifest that declares them (tasks/PLAN-deletion.md §3)
+    sync_dir(&store.join("catalog"))?;
+    sync_dir(&packs_dir)?;
+    if !derived.is_empty() {
+        sync_dir(&store.join("derived").join(opts.adapter.name()))?;
+    }
     let batch = Batch {
         id: batch_id,
         created: ts_now(),
@@ -444,7 +457,7 @@ pub fn ingest_with_max_artifact_bytes(
     })
 }
 
-fn write_gitattributes(store: &Path) -> Result<()> {
+pub(crate) fn write_gitattributes(store: &Path) -> Result<()> {
     let p = store.join(".gitattributes");
     if !p.exists() {
         std::fs::write(

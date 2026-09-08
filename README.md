@@ -102,6 +102,22 @@ traj extract rounds/round-0001 /tmp/traj-round-0001
 `traj edit <path>` opens a temporary copy in `$EDITOR` and prints a diff; it never writes back into the store.
 You do not need FUSE for any of these native CLI commands.
 
+### Delete one trajectory
+
+Deletion is rare and deliberate. It removes one catalog path, a file or a whole subtree such as a round, from every
+batch, and keeps the earlier version in Git:
+
+```bash
+traj delete rounds/round-0002            # dry run: what would be removed
+traj delete rounds/round-0002 --yes      # rebuild, verify, swap in
+traj commit "$TRAJ_STORE"                # checkpoint the deletion
+```
+
+The store must be committed and unchanged before `--yes`, and no `traj mount` may serve it (the command names the
+mountpoints to unmount). Later packs of the same source skip the deleted path. If an apply is interrupted,
+`traj delete --recover` discards the leftover sibling directory; the store itself is always either the old or the
+new verified version. [Protocol.](tasks/PLAN-deletion.md)
+
 ### Query events and compare tasks
 
 With the `copilot-cli` adapter from the quick start:
@@ -384,8 +400,10 @@ limit and 60 MiB; large tables and content are split into physical segments.
   `verify --deep` re-hashes stored blobs. Keep private run data private, even when its packed representation is small.
 - **Live runs are per-file checkpoints.** Ingestion binds each file to a captured inode and byte prefix. It does not
   produce an atomic snapshot of an entire changing run; pause the runner when you need that guarantee.
-- **Append-oriented history.** Removed source paths and newly excluded files are not purged from existing archives.
-  There is no in-place editing or `traj compact` command. [Task-scoped deletion is planned, not implemented.](tasks/PLAN-deletion.md)
+- **Append-oriented history, explicit deletion.** Removed source paths and newly excluded files are not purged
+  from existing archives. `traj delete <path>` is the one deleting verb: it rebuilds the store without one file or
+  subtree, deep-verifies the result, and swaps it in atomically; it requires the store to be committed first and no
+  mount to serve it. [Protocol and recovery.](tasks/PLAN-deletion.md)
 - **Files, not full backup metadata.** Supported entries are regular files, empty files, and symlink targets under
   UTF-8 paths. Regular-file modes normalize to 0644/0755 according to executable bits. Empty directories, ownership,
   ACLs, original xattrs, and special files are not preserved; `extract --mtime` restores recorded file timestamps.
@@ -393,7 +411,7 @@ limit and 60 MiB; large tables and content are split into physical segments.
 Mount memory is a best-effort target, not a hard process-memory cap. Very large file reads and trajectory parsing
 can materialize whole blobs. Bounded artifact sizes do not remove a Git host's total repository-size limits.
 
-New stores use format 2; readers also support format 1. See [the storage design](docs/PLAN.md) and
+New stores use format 3 (format 2 plus the `deleted` list); readers also support formats 1 and 2. See [the storage design](docs/PLAN.md) and
 [the mount design](docs/PLAN-fuse.md) for the detailed contracts and limitations.
 
 ## Development

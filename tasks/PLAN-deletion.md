@@ -1,286 +1,254 @@
-# Plan: delete one task-scoped experiment
+# Plan: delete one trajectory from a store
 
-**Status: proposed; no deletion command is implemented yet.**
+**Status: implemented as `traj delete` (2026-09-06). This document is the protocol it follows.**
 
-Delete one task execution, including all of its agents, rounds, logs, reviews, and workspace snapshots. Do not
-delete a round on its own. A run may contain several tasks, and an unfinished task execution is still a valid
-deletion unit.
+Delete one trajectory from the current archive while keeping every earlier version in Git. A trajectory is
+named by its catalog path: one file, or one directory subtree such as a round or a whole task execution. The
+first principle is to be as simple as possible while being correct. Correctness here means:
 
-Change the current archive files and record that change in a normal Git commit. Keep earlier Git versions.
-Deletion is rare: favor a verified rewrite over in-place pack surgery.
+1. At every instant, the store directory on disk is a complete, verifiable store: either the old one or the new one.
+2. Nothing is removed from disk before the replacement has been deep-verified and made durable.
+3. The state before the deletion is always recoverable from Git, so recovery never has to guess.
+4. Once a trajectory is deleted, later `pack` runs do not silently bring it back.
 
-## 1. Define the boundary
+Everything else in the earlier draft of this plan (task inventories, ownership columns, a maintenance lease on a
+directory descriptor, a transaction journal with five recovery states, plan digests) was dropped. The store already
+has the only ownership notion it needs: the path.
 
-| Term | Meaning in this plan |
-|---|---|
-| Task | A problem or objective given to the agents. |
-| Experiment / task execution | One execution of one task, starting at an explicit task boundary. It can be solved, failed, stopped, or still partial. |
-| `experiment_id` | A stable identifier for that execution, not its model, task name, round number, or directory basename. Retrying the same problem creates another ID. |
-| Run | A container that may hold several task executions. It is not automatically a deletion unit. |
-| Round | One iteration within a task execution. It is never independently deletable through this command. |
-| Store | One `.trajstore` archive. Today, its scope is the source tree passed to `traj pack`; it need not equal a task. |
-| Published snapshot | The manifest and every artifact it declares, including catalog history and derived tables. |
-| Deletion record | Small persistent metadata saying that an execution was deliberately removed, so later ingestion cannot silently bring it back. |
+## 1. Granularity: what a store is and what a trajectory is
 
-For the user's `onesw-gen` example, delete the whole task execution, not one of its rounds. A task-level start and
-completion decision establish the lifecycle; a round's `DONE` marker is only a checkpoint. Missing completion
-does not prevent deleting an otherwise unambiguously identified partial execution.
+**A store is the source tree passed to `traj pack`, plus the batches appended to it later.** It is not
+automatically one task, one round, or one campaign; `pack` archives whatever boundary it is given. For new archives,
+prefer **one task execution per store**, keeping all of that execution's agents and rounds together. A run is then
+a collection of task stores. The full discussion, including the effects on deduplication, ingestion, queries, Git,
+and concurrency, is in [granularity.md](granularity.md).
 
-Recommend **one task execution per store** for new archives. Support multiple tasks in one store when ownership
-is explicit. Do not silently delete only part of an execution fragmented across stores: reject that case in the
-first version and report the locations requiring consolidation. Copies outside the selected archive scope remain.
-See [store granularity](granularity.md).
+| Unit | Meaning | How it appears in a store |
+|---|---|---|
+| Task | A problem or objective | Usually the store itself, or a directory such as `tasks/task-a-0001` |
+| Task execution | One attempt at a task, finished or not | The same directory; retries get new directories or new stores |
+| Round | One iteration of agent work inside an execution | A directory such as `rounds/round-0002` |
+| Trajectory file | One parseable log, for example `events.jsonl` | One catalog path |
+| Batch | One `pack` capture | Catalog rows carrying that batch id, across every batch |
 
-## 2. What deletion means
+Every one of these units is a **path prefix** in the catalog. Rows, directory summaries, exclusion records and event
+rows are all keyed by path. Deletion therefore takes one path and removes everything at or below it, in every
+batch. The user picks the unit by picking the path; the dry run shows exactly what the prefix covers.
 
-Remove the selected execution's file-catalog rows across **all published batches**, not just its latest paths.
-Remove its owned exclusion records and derived events too. Keep every other execution's retained history and bytes.
-Repack only content still referenced by surviving rows.
+Two consequences of the recommended layout:
 
-Keep Git history, raw source trees, and other copies untouched. Do not stop agent processes, rewrite commits,
-force-push, or promise secure erasure. Shared content needed by another task remains. Shared run-level provenance
-may still mention the deleted task; this is task removal, not a text-redaction operation.
+- In a one-task-per-store layout, deleting the task is `git rm -r` of the store directory plus moving the raw tree
+  aside. No command is needed.
+- `traj delete` exists for the other cases: one round or one log inside a task store, or one task inside a grouped
+  store. A grouped store rewrites more surviving data; that is the cost of grouping, not a correctness risk.
 
-The deletion record is not a substitute for deletion. The task's owned payloads and records leave the current
-archive; the small record prevents accidental re-ingestion. If no tasks remain, keep a valid, empty store with that
-record rather than removing the store directory and losing its identity.
+Not supported, deliberately: deleting by round number, model name, or attribute; bulk deletion; deleting an
+execution that is split across several stores (delete from each store separately); secure erasure; rewriting Git
+history. Content shared with a surviving path stays because it is still referenced; deletion is by reference, not by
+content.
 
-## 3. Gaps in the current implementation
-
-| Current behavior | Required change |
-|---|---|
-| [`Adapter::is_trajectory`](../crates/trajfs-core/src/adapter.rs) identifies parseable log files, not task executions. | Add a separate task-boundary and ownership contract. Do not reuse this predicate as the deletion boundary. |
-| [`FileRow`](../crates/trajfs-core/src/lib.rs) has paths, hashes, batches, and free-form attributes. | Persist authoritative task ownership; an optional `round` or `role` attribute is not enough. |
-| [`insert_latest`](../crates/trajfs-core/src/store.rs) retains absent historical paths. | Removing a source directory or changing retention rules is not deletion. |
-| [`ingest`](../crates/trajfs-core/src/ingest.rs) adds immutable packs and batch tables. | Build replacement artifacts without overwriting the published ones. |
-| [`traj derive`](../crates/traj/src/cmd/derive.rs) reparses latest retained trajectories. | Deletion must filter existing event history, not rebuild only the latest logs and lose other tasks' history. |
-| [`mount::open_snapshot`](../crates/traj/src/mount/mod.rs) deliberately opens without the normal reader lock. | Add a maintenance lease before reclaiming artifacts a mount could still use. |
-| [`traj commit`](../crates/traj/src/cmd/commit.rs) stages one store with `git add -A`. | Reuse its scoped commit behavior; account for deletion records and maintenance-aware messages. |
-
-## 4. Make ownership explicit before allowing deletion
-
-Add a manifest-declared task inventory and typed ownership on file, exclusion, and event records. An owner is one
-`experiment_id`, explicitly shared infrastructure, or unclassified. **Unclassified does not mean shared.**
-
-The inventory records each execution's identity, task label, source-run identity, owned roots/paths, start evidence,
-and observed lifecycle state. Adapters describe these boundaries from the runner's actual layout and signals.
-Normal agents continue writing files; no agent SDK change is required.
-
-First-version rules:
-
-- Require complete, reviewed ownership classification for the affected store, including historical records.
-- Allow several disjoint owned roots for one execution, so auxiliary outputs are not accidentally omitted.
-- Reject overlapping task roots, ambiguous reused roots, and cross-task file/directory shadowing.
-- Reject inseparable mixed-task payloads unless an explicit, validated splitter exists. Do not drop a shared log
-  wholesale or quietly call task payloads "shared" to bypass the check.
-- Never infer task boundaries from round numbers, model names, modification times, or a terminal marker alone.
-- Legacy stores require an explicit ownership-adoption step, based on archived evidence and a supplied adapter.
-  Preserve the original store until that adoption is verified and committed.
-
-Introduce a **deletion-capable format 3**. Readers continue supporting formats 1 and 2; adoption is explicit.
-Format 3 must validate task metadata and deletion records, and old binaries must reject it rather than silently
-discarding those records on a later write.
-
-Keep the existing `catalog/`, `packs/`, and `derived/` layout. Publish task inventories and deletion records as
-bounded, manifest-declared tables. Do not invent unlisted sidecars that SQL, verification, or the Git hook ignores.
-Persist monotonic artifact-ID high-water marks so removing the last pack does not reset future allocation to one.
-
-## 5. Proposed command
-
-The following interface is **planned**, not available today. `task-a-0001` is an inventory ID for one execution.
-`PLAN_DIGEST` is the digest printed by the read-only preview.
-
-```bash
-traj -S stores/run-42.trajstore delete-task task-a-0001 --dry-run
-traj -S stores/run-42.trajstore delete-task task-a-0001 --apply "$PLAN_DIGEST"
-traj commit -m "Delete task execution task-a-0001" stores/run-42.trajstore
-```
-
-Default to a read-only preview. Show the task identity, lifecycle state, owned roots, affected rounds and agents,
-path/version counts, surviving tasks, shared-content retention, and the Git checkpoint. Report unreferenced logical
-blob bytes separately from estimated compressed reclamation: shared frames make exact reclamation a rewrite result.
-
-Bind the digest to the target ID, complete source-artifact fingerprints, ownership rules, manifest, Git base commit,
-and relevant configuration. Recompute it under the apply locks. A stale preview requires a new preview.
-
-Accept exactly one registered execution ID. No file paths, round selectors, globs, bulk deletion, or force flag
-that bypasses ownership and integrity checks. An unknown ID is an error; an already deleted ID is an explicit,
-idempotent "already deleted" result with no new batch or commit.
-
-## 6. Preservation invariants
-
-Let `C` be all published file-catalog rows, including historical versions; let `e` be the selected execution ID;
-and let `owner(r)` be the declared owner of row `r`. Let `Empty` denote the existing zero-length-file kind.
+## 2. The on-disk model both protocols rely on
 
 ```text
-C_keep = all rows r in C for which owner(r) != e
-H_keep = distinct r.sha values in C_keep, excluding rows whose kind is Empty
+task-a.trajstore/
+  MANIFEST.json                  the only mutable file; names every published artifact
+  catalog/{files,dirs,excluded}-B[-P].parquet
+  packs/NNNN.pack, packs/index-B[-P].parquet
+  derived/<adapter>/<table>-B[-P].parquet
+  .lock                          flock target: shared for readers, exclusive for writers
+  .gitattributes
 ```
 
-Preserve the original batch/path ordering of `C_keep`. For every hash in `H_keep`, preserve and verify the original
-bytes. A hash shared with another execution or an explicitly shared artifact stays, even if the deleted execution
-also referenced it.
+Two invariants make the store transactional with nothing but rename:
 
-Required postconditions:
+- **Artifacts are immutable and never reused.** A pack or Parquet segment is written under a temporary name,
+  synced, and then hard-linked into its final name; an existing final name is never replaced. Pack ids only grow.
+- **The manifest is the commit point.** Readers open the manifest and then only the artifacts it declares. A file
+  that exists but is not declared is invisible, and is removed as an orphan by the next writer. `MANIFEST.json` is
+  replaced atomically (temp file, fsync, rename), so a reader sees either the old inventory or the new one.
 
-- No owned file, exclusion, or event record for `e` remains in the published data tables.
-- Every surviving file row keeps its path, kind, mode, size, hash, mtime, attributes, and logical batch identity.
-- Other tasks' event rows retain their payloads, sequence numbers, adapter versions, multiplicity, and ordering.
-- Other tasks' latest visible namespaces are unchanged. Reject a rewrite that would resurrect previously shadowed
-  non-target paths through an ownership conflict.
-- Directory summaries, retained batch counts, indexes, and the manifest agree with the rewritten data.
-- All declared artifacts exist, fit the configured size limits, and pass deep verification; no obsolete finalized
-  data artifacts remain when the command reports completion.
+Git holds the store's files as ordinary tracked content. `traj commit <store>` stages exactly the store's path and
+commits. The pre-commit hook checks that the staged tree is a complete store: every declared artifact present, no
+undeclared finalized artifact, no foreign file. A commit is therefore a verified checkpoint of one whole store.
 
-Keep original ingestion measurements as provenance. Do not present newly rewritten pack sizes as measurements of
-an earlier ingest. Format 3 must distinguish historical ingest statistics from current retained counts and storage.
+## 3. Transaction protocol of `traj pack`
 
-## 7. Apply: build, verify, publish, clean
+`pack` appends one batch. Its protocol, as implemented in `trajfs-core/src/ingest.rs`:
 
-1. **Establish the Git checkpoint.** Require the selected store to be fully tracked and unchanged from `HEAD`,
-   with no staged, unstaged, untracked, or ignored extra payloads inside it. Unrelated repository changes are allowed.
-   Check actual committed Git blob contents against the published artifacts, not just cached `git status` results.
-   Refuse uncommitted data or external-filter/LFS pointers that do not themselves provide the required checkpoint.
+| Step | Action | State if interrupted here |
+|---|---|---|
+| P0 | Take the exclusive lock on `.lock`; refuse if a deletion of this store is pending (§4.6). | Unchanged. |
+| P1 | Remove orphans: temporary files and finalized artifacts the manifest does not declare. | Unchanged; this is `pack`'s own recovery step. |
+| P2 | Verify the existing store; load its rows and blob index. | Unchanged. |
+| P3 | Walk the source, skipping deleted prefixes (§5), hash every candidate. | Unchanged. |
+| P4 | Write new packs under fresh ids: each pack is synced, then hard-linked to its final name. | Old manifest still published; new packs are undeclared orphans. |
+| P5 | Write catalog, index and derived segments the same way. | Same. |
+| P6 | Sync the artifact directories. | Same. |
+| P7 | Publish the manifest: write temp, fsync, rename over `MANIFEST.json`, fsync the store directory. **Commit point.** | Before the rename: old snapshot. After: new snapshot. |
 
-2. **Acquire maintenance access.** Hold the exclusive maintenance lease, then the existing exclusive store lock.
-   Revalidate the Git checkpoint, source fingerprints, task ownership, and preview digest. Deep-verify the source.
-   A busy store, invalid configuration, unknown artifact, or corrupt input stops the operation.
+Guarantees: a crash at any step leaves the old snapshot valid and readable; the next `pack`, `derive` or `delete`
+removes the undeclared leftovers. There is no partial batch: either the manifest declares the batch and all of
+its artifacts, or none of them are visible. Readers holding the shared lock are blocked for the duration; a mount,
+which reads without the lock, keeps its current snapshot until it notices the new manifest and reopens.
 
-3. **Write a durable intent.** Create an exclusive, no-follow transaction journal and a private staging directory
-   under the store, on the same filesystem. Record the operation ID, Git checkpoint, old manifest digest, target,
-   and owned staging paths. Sync the journal and its directory before creating replacement artifacts.
+`traj derive` follows the same shape: it writes a fresh `events-rebuild-N` generation, publishes it in the manifest,
+and only then removes the previous generation.
 
-4. **Rewrite retained data.** Stream `C_keep` and its referenced blobs into new packs, checking SHA-256 while copying.
-   Rebuild all indexes and directory summaries. Preserve logical batch IDs, including empty batches where necessary;
-   produce schema-correct empty tables when the last task is removed. Filter existing derived rows by ownership
-   without reparsing logs or deduplicating legitimate historical event rows.
+Git is a separate, later step. `traj commit` stages the store, and the hook refuses an incomplete inventory. Until
+that commit, the new batch exists only on disk; that is acceptable because `pack` is repeatable from the raw tree.
 
-5. **Use fresh physical names.** Allocate pack IDs and synchronized catalog/index suffixes that have never been
-   published before. Extend the segmented-writer helpers rather than overwriting `files-0001.parquet` or reusing an
-   old pack number. Keep the existing lower-of-hook-limit-and-60-MiB artifact bound, including new metadata tables.
+## 4. Transaction protocol of `traj delete`
 
-6. **Verify the candidate independently.** Compare surviving rows and event records against the source projection,
-   then deeply verify the candidate's content and metadata. Check task absence, survivor visibility, byte equality,
-   schema, part ordering, counts, and size bounds. Persist a prepared journal containing the exact old/new artifact
-   inventories and expected new manifest digest. Sync the candidate files and relevant directories.
+Let `S` be the store directory and `W = S` with `.deleting` appended, a sibling in the same directory and hence on
+the same filesystem. `traj delete` never modifies anything inside `S`. It builds a complete replacement store in
+`W`, verifies it, and swaps the two directories in one atomic system call.
 
-7. **Publish once.** Install the new immutable artifacts without replacement, using the existing exclusive
-   publication pattern. Sync their parent directories. Atomically replace `MANIFEST.json`, then sync the store
-   directory. This manifest replacement is the logical commit point; the directory sync supplies its durability
-   barrier on the supported filesystem.
+### 4.1 Preconditions (all checked before anything is written)
 
-8. **Reclaim and finish.** Remove only the journal's verified obsolete inventory: old published data paths no longer
-   referenced by the new manifest. Verify root containment and file identity before unlinking; never glob-delete
-   directories or remove the store root. Re-verify the live store, sync affected directories, remove staging and the
-   journal, sync the store root, and release locks. Only then report deletion complete.
+| Check | Why | On failure |
+|---|---|---|
+| `S` is inside a Git worktree, tracked, and identical to `HEAD` (no modified, untracked, or ignored files under it, except the lock file). | Git is the recovery anchor. The state before deletion must be a commit. | Refuse: "commit the store first" (or clean it). |
+| No `W` exists. | A pending deletion must be resolved first. | Refuse; run `traj delete --recover`. |
+| No FUSE mount serves `S`: no `fuse.traj` mount whose label is `S` or a directory containing `S`. | A mount reads pack files by name; after the swap the same names hold different bytes. | Refuse, listing the mountpoints: "please unmount: `traj umount <mountpoint>`". |
+| Exclusive `.lock` acquired. | No reader or writer may hold the old artifacts open. | Refuse: another command holds the store. |
+| The store passes verification. | Never rewrite a broken source. | Refuse; repair first. |
+| The path exists in at least one batch and is not already in the deleted list. | Nothing to do otherwise. | Refuse, or report "already deleted". |
 
-Use bounded streaming readers and writers; never materialize the entire archive. Extend blob verification to stream
-multipart content where the current whole-blob API would require excessive memory. Preflight conservative staging
-space and still handle disk/quota exhaustion at every write. Insufficient space must not trigger in-place fallback.
+A mount started during the seconds of an apply is the only window these checks leave open. Its effect is benign:
+that mount sees hash-verification failures until its next manifest refresh reopens the new store. Store contents
+are never affected.
 
-## 8. Readers, mounts, and recovery
+### 4.2 Build the candidate in `W`
 
-The first version is an **offline maintenance operation for the affected store**. A store containing several tasks
-will temporarily block all of them; separate stores remain independent.
+For each batch, in id order:
 
-Add a shared/exclusive maintenance lease on an open store-directory descriptor on supported local Linux
-filesystems. Ordinary readers, writers, and mounts hold it shared; deletion and recovery need it exclusively.
-The directory inode stays stable because publication replaces the manifest, not the whole store directory.
-Verify cross-process lock behavior and directory syncing on the target filesystem; refuse deletion where those
-guarantees are unavailable. Do not fall back to the existing `.lock` alone.
+1. Read the batch's file rows (with attributes). Keep the rows whose path is not at or below the target.
+2. Rebuild the directory table from the kept rows.
+3. Read the batch's exclusion records; keep the ones not at or below the target.
+4. Repack content: every kept row's hash that has not yet been written to `W` is read from `S` with its hash
+   checked, and written to `W`'s packs. Pack ids continue from one; the batch's index lists the hashes it wrote.
+   Empty files have no blob, as before.
+5. Write the four batch tables with the same segmented writer `pack` uses, under the same names.
+6. Copy each of the batch's derived tables, dropping the rows whose `trajectory` column is at or below the target.
+   Tables without that column are copied unchanged. Names are preserved, so the manifest's derived lists carry over.
+7. Record the batch with its original id, timestamp, label, errors, and elapsed time, and with its retained counts
+   (paths, bytes, new blobs, packed bytes, exclusions) recomputed from what was written. Verification compares those
+   counts to the tables, so they must describe the rewritten data, not the original ingest.
 
-Acquire locks in one order: maintenance lease, then ordinary store lock. Mounts retain their maintenance lease but
-still bypass the ordinary reader lock, so normal append ingestion can continue while mounted. Keep unlocked
-snapshot construction behind a retained lease or writer guard; no bypass may outlive its guard.
-Public openers reject private transaction staging directories; candidate readers use the operation's internal guard.
+Then write the manifest with a new entry in the `deleted` list (§5), the `.gitattributes`, and an empty `.lock`.
+A batch whose rows are all deleted stays in the manifest with empty tables, so batch ids and history order are
+stable for the survivors.
 
-Deletion refuses an active mount with an actionable unmount message. It does not kill readers, force-unmount,
-or reclaim packs behind open handles. Initial adoption is also offline: old binaries and external readers that do
-not participate in this protocol must be stopped first. This is advisory coordination, not protection against
-arbitrary filesystem edits.
+Memory: the rebuild streams rows batch by batch and blobs one at a time. A single blob is materialized whole, which is
+what `verify --deep` and `cat` already do.
 
-Every opener and writer must inspect a pending deletion journal **before ordinary orphan cleanup**. After a crash,
-block normal operations until explicit recovery. Recovery acquires the same locks and compares the actual manifest
-digest with the journal, rather than trusting a possibly stale phase label.
+### 4.3 Verify the candidate independently
 
-| Observed state | Recovery action |
+Open `W` as a normal store and run deep verification: every declared artifact present, every hash re-computed from
+the packed bytes, per-batch counts matching, directory tables matching file rows. Then scan `W` again and check:
+
+- no row, exclusion record, or event row at or below the target remains;
+- every kept row of every batch is present with identical path, kind, mode, size, hash, mtime, batch, and attributes;
+- the survivor row count equals the plan's count.
+
+Then fsync every file and directory under `W`. Only after this may `W` replace `S`.
+
+### 4.4 Swap and finish
+
+| Step | Action | State if interrupted here |
+|---|---|---|
+| D1 | Lock `W/.lock` exclusively (so the new `S/.lock` is held until the end). | `S` old, `W` candidate. Not applied. |
+| D2 | `renameat2(S, W, RENAME_EXCHANGE)`: `S` and `W` exchange names atomically. **Commit point.** Then fsync the parent directory. | Before: as D1. After: `S` new, `W` old. Applied. |
+| D3 | Remove `W` (now the old store). | `S` new; leftover `W`. Applied. |
+| D4 | Release the locks and report. Print the `traj commit` command. | `S` new. Applied, uncommitted. |
+
+The exchange is a single system call, so there is no state in which `S` is missing or half-populated. If the
+filesystem does not support `RENAME_EXCHANGE`, the command refuses before building anything and says so.
+
+### 4.5 States and recovery
+
+The on-disk state is fully described by two facts: does `W` exist, and does `S`'s manifest carry the new deletion
+record? Recovery does not need a journal because both answers are readable from disk.
+
+| `W` exists | `S` manifest has the record | Meaning | Recovery |
+|---|---|---|---|
+| no | no | Nothing pending. | None. |
+| yes | no | Interrupted before the exchange. `S` is untouched. | Remove `W`. Report "not applied". |
+| yes | yes | Interrupted after the exchange. `S` is the verified new store. | Remove `W`. Report "applied, run `traj commit`". |
+| no | yes | Applied, not yet committed. | `traj commit`, or discard with Git (below). |
+
+`traj delete --recover` performs the removal after checking that `S` opens and verifies. `pack` and `derive`
+refuse to touch a store while `W` exists, so a leftover cannot be built upon by accident. Readers are unaffected:
+`S` is always a valid store.
+
+**Undo after apply, before commit.** The pre-deletion store is `HEAD`:
+
+```bash
+git checkout HEAD -- stores/task-a.trajstore
+git clean -fdx -- stores/task-a.trajstore
+```
+
+**Undo after commit.** Earlier versions stay in Git history; restore the store's path from the earlier commit in a
+separate worktree or with the same two commands against that commit. Deletion never rewrites history.
+
+### 4.6 Git
+
+`traj delete` does not run Git. After D4, `traj commit <store>` stages the store's path, which now contains
+modified, added, and removed files, and commits with a message naming the deleted path. The hook validates the
+staged inventory exactly as it does for a new batch. Repacking changes pack contents, so a deletion commit can add
+Git objects even though the working tree shrinks; the old objects are kept on purpose.
+
+## 5. Preventing resurrection
+
+The manifest gains a `deleted` list (format 3):
+
+```json
+"deleted": [
+  {"path": "rounds/round-0002", "created": "2026-09-06T10:00:00Z",
+   "paths": 17, "bytes": 1048576, "events": 240, "excluded": 0, "blobs": 5, "blob_bytes": 900000}
+]
+```
+
+`pack` and `watch` skip every source entry at or below a deleted path, regardless of the rule profile, and record
+it in the batch's exclusion table with rule `deleted`. The raw tree is not touched; the dry run reports when the
+source still contains the path. Deleting a path a second time is refused as already deleted. A retry of the same
+task must use a new directory, or a new store; the deleted list is permanent for the store.
+
+Format 3 is format 2 plus this list. Readers accept formats 1 through 3; a binary that does not know format 3
+refuses the store instead of dropping the list on its next write.
+
+## 6. Command
+
+```bash
+traj -S stores/run-42.trajstore delete tasks/task-a-0001          # dry run: what would be removed
+traj -S stores/run-42.trajstore delete tasks/task-a-0001 --yes    # apply (§4)
+traj commit -m "Delete task-a-0001" stores/run-42.trajstore       # checkpoint in Git
+traj -S stores/run-42.trajstore delete --recover                  # after an interruption
+```
+
+The dry run prints the batches touched, rows and bytes removed, event and exclusion rows removed, blobs that become
+unreferenced, survivors, the Git and mount checks, and whether the raw source still contains the path.
+`--yes` is the only switch; there is no force flag that bypasses a check.
+
+## 7. Tests
+
+| Case | Expected |
 |---|---|
-| Intent or partial candidate; old manifest still published | Verify the old snapshot; discard only transaction-owned candidates. Report that deletion was not applied. |
-| Prepared candidate installed; old manifest still published | Same safe abort path. Do not publish a deletion merely because candidate files exist. |
-| New manifest published; old artifacts remain | Verify the new snapshot and finish the exact obsolete-inventory cleanup. |
-| Cleanup interrupted | Resume idempotently; a previously removed authorized obsolete path is already complete. |
-| Expected published artifact missing/corrupt, or manifest matches neither digest | Stop, preserve evidence, and require repair. Never guess which files are safe to delete. |
+| Two rounds in one store, three batches; delete one round | Its rows, events and exclusions are gone from every batch; every other row is byte-identical; `verify --deep` passes; SQL and `ls` agree. |
+| Delete one file | Same, for a single path; a shared blob survives because another path references it. |
+| Unknown path, path already deleted, store not committed, store dirty, store mounted (simulated leftover), pending `W` | Refused before any write; `S` unchanged. |
+| Interrupted before the exchange (leftover candidate) | `--recover` removes it, `S` unchanged, `pack` refused until then. |
+| Interrupted after the exchange (leftover old copy) | `--recover` removes it, `S` is the new store. |
+| `pack` the same source again after deletion | The deleted path is skipped and recorded as excluded; other changes are archived. |
+| `traj commit` after deletion | Message names the path; the hook accepts the staged store; `check-tree HEAD` passes; the pre-deletion store is readable from the previous commit. |
+| Last path removed | A valid store with empty tables, zero counts, and the deletion record. |
 
-Once the new manifest is published, recovery moves forward; it does not attempt a partial rollback after old files
-may have been removed. A cleanup or sync failure is an explicit incomplete operation, not success with a warning.
-Keep the journal for recovery. Never restore the entire Git worktree as an automatic error handler.
+## 8. Implementation map
 
-## 9. Prevent resurrection and preserve Git history
-
-`pack` and `watch` must honor deletion records before hashing or deriving task-owned inputs. Deletion suppression
-overrides retention rules, including `--rules none` and `always_keep`. Keep raw inputs intact, but report that their
-deleted execution is intentionally excluded.
-
-Use task-aware readiness identities. Deleted-task markers must not consume another task's readiness label, produce
-endless empty batches, or block archival of surviving tasks. A new execution of the same problem needs a new ID and
-an unambiguous boundary; changing an adapter or reusing a directory must not clear a deletion record.
-
-Filesystem publication and Git commit are separate steps. The existing checkpoint protects history before apply;
-after apply, `traj commit` creates a forward commit containing only the selected store's replacements and removals.
-Do not invoke it while still holding exclusive deletion locks: both commit and its hook open the store as readers.
-If committing later fails, leave a valid deleted working tree and report the Git failure, rather than undoing the
-deletion or modifying unrelated staging. Do not push automatically.
-
-Extend the Git hook to recognize format-3 published tables and validate the complete staged inventory. Transaction
-journals, staging directories, missing segments, and unreferenced finalized artifacts are not valid committed
-stores. Teach commit summaries to describe maintenance instead of pretending another ingest batch occurred.
-
-Earlier versions remain available through Git. Inspect or recover them in a separate worktree. Restoring a deleted
-execution to the live archive is an explicit, quiesced operation, not an automatic retry or history rewrite.
-Repacking can increase Git repository size even while reducing the current archive: old objects are deliberately kept.
-
-## 10. Implementation order
-
-Keep implementation in Rust and split the non-trivial deletion feature into focused modules.
-
-| Phase | Work |
+| Location | Change |
 |---|---|
-| Ownership | Add task identity, inventory, and ownership types; extend declared adapters; provide explicit legacy adoption and validation. |
-| Format and readers | Add format 3, declared task/deletion tables, persistent allocation counters, and maintenance leases. Update manifest opening, verification, SQL, mounts, and the hook together. |
-| Planner | Add `crates/trajfs-core/src/deletion/plan.rs` and a thin CLI `delete-task` command. Implement complete preview, Git checkpoint checks, and stale-plan rejection first. |
-| Rewriter | Add focused `rewrite.rs` and `verify.rs` modules. Reuse pack/catalog primitives, but add fresh-name allocation, bounded streaming, and exact event filtering. |
-| Transaction | Add `journal.rs` and `recover.rs`. Establish durable ordering and failure outcomes before enabling application. |
-| Integration | Wire deletion suppression into ingestion/readiness, expose pending operations in `doctor`, update commit messages, command help, the exported skill, and documentation. |
-
-Do not expose a destructive command before ownership, recovery, and reader coordination are complete.
-Do not broaden this work into generic file deletion, background garbage collection, multi-store transactions,
-secure erasure, or a new agent runtime.
-
-## 11. Required evidence before release
-
-Use the existing Rust test infrastructure and synthetic fixtures. Add task-aware fixtures rather than depending on
-one private runner's data.
-
-| Case | Required outcome |
-|---|---|
-| Two tasks, several agents and rounds | Removing one execution removes all its rounds and no part of the other. |
-| Partial task without a terminal marker | The whole identified execution can be removed. |
-| Round/log/path selector, unknown ID | Refused without modifying the store. |
-| Repeated task names with different execution IDs | Only the selected execution changes. |
-| Unclassified, overlapping, reused, or fragmented ownership | Refused; no guessed boundary or partial-task deletion. |
-| Shared blobs and historical survivor versions | Required bytes remain readable; all surviving history is preserved. |
-| File/directory type changes across batches | No non-target namespace resurrection or disappearance. |
-| Incremental and rebuilt events | Preserve all non-target event rows and payloads, without reparsing or collapsing history. |
-| Empty files, symlinks, large multipart blobs, segmented tables | Preserve content semantics and all physical size bounds. |
-| Source corruption, stale plan, changed adapter/configuration | Refused before publication. |
-| Active SQL/readers/mounts or another writer | Busy refusal; no forced eviction and no partial output. |
-| Crash, write error, disk full, or sync failure at each transaction boundary | Old or new validated snapshot after recovery, never a mixture or false success. |
-| Symlink/path replacement or unexpected files during cleanup | No unlink outside the verified obsolete inventory. |
-| Last task removed | Valid empty store, browsable virtual root, zero root size/count summaries, empty schema-bearing views, and durable suppression metadata. |
-| Subsequent pack/watch, including identical round labels in another task | Deleted execution stays absent; other tasks continue archiving normally. |
-| Git checkpoint and deletion commit | Old task data remains retrievable from Git; current tracked artifacts are correct; unrelated staging/worktree changes survive. |
-| Repeated apply/recovery | Explicit idempotent result, with no duplicate deletion records or spurious batches. |
-
-The release criterion is not just "the task disappeared." It is: **the whole selected task disappeared from the
-current archive, every other task remained correct, Git kept the earlier version, and every interrupted operation
-has a deterministic recovery path.**
+| `crates/trajfs-core/src/manifest.rs` | Format 3: `deleted` list; the manifest save syncs the store directory. |
+| `crates/trajfs-core/src/walk.rs`, `ingest.rs` | Deleted prefixes are skipped and recorded as excluded; `pack` refuses when a deletion is pending; artifact directories are synced before the manifest is published. |
+| `crates/trajfs-core/src/delete.rs` | Plan, rebuild into `W`, verification, atomic exchange, recovery. |
+| `crates/traj/src/cmd/delete.rs` | The command: Git and mount preconditions, dry run, apply, recover. |
+| `crates/traj/src/cmd/commit.rs`, `mount.rs` | Deletion commit messages; mounts ignore `*.deleting` siblings and report which mounts serve a store. |

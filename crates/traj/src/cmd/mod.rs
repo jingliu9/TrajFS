@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod browse;
 pub mod commit;
+pub mod delete;
 pub mod derive;
 pub mod grep;
 pub mod hook;

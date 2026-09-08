@@ -840,6 +840,9 @@ impl TrajFs {
             let mut seen = BTreeMap::new();
             for e in std::fs::read_dir(root)? {
                 let p = e?.path();
+                if trajfs_core::delete::pending_sibling(&p).is_some() {
+                    continue; // a deletion's work directory, never a store to serve
+                }
                 match std::fs::metadata(p.join("MANIFEST.json")) {
                     Ok(m) if m.is_file() => {
                         let id = store_id_of(&p);

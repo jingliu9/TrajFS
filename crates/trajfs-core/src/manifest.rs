@@ -20,6 +20,27 @@ pub struct Manifest {
     pub rules: RulesInfo,
     #[serde(default)]
     pub batches: Vec<Batch>,
+    /// Paths removed by `traj delete` (format 3). `pack` skips source entries at or below them.
+    #[serde(default)]
+    pub deleted: Vec<Deletion>,
+}
+
+/// One applied deletion (tasks/PLAN-deletion.md §5).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Deletion {
+    /// Catalog path: one file or the root of a subtree.
+    pub path: String,
+    pub created: String,
+    /// Catalog rows removed, over every batch.
+    pub paths: u64,
+    pub bytes: u64,
+    /// Derived event rows removed.
+    pub events: u64,
+    /// Exclusion records removed.
+    pub excluded: u64,
+    /// Blobs no longer referenced by any surviving row, and their raw bytes.
+    pub blobs: u64,
+    pub blob_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -143,6 +164,14 @@ fn parquet_path(dir: &str, stem: &str) -> Result<PathBuf> {
     let mut name = path.into_os_string();
     name.push(".parquet");
     Ok(PathBuf::from(name))
+}
+
+/// fsync a directory so that renames and links inside it are durable.
+pub fn sync_dir(dir: &Path) -> Result<()> {
+    let file = std::fs::File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", dir.display()))?;
+    Ok(())
 }
 
 fn is_manifest_temp(name: &str) -> bool {
@@ -391,9 +420,14 @@ impl Manifest {
         Ok(inventory)
     }
 
-    /// Upgrade a V1 manifest to explicit derived-artifact publication.
+    /// Upgrade an older manifest: V1 gains explicit derived-artifact publication;
+    /// V2 only changes its format number (format 3 adds the optional `deleted` list).
     pub fn upgrade(&mut self, store: &Path) -> Result<()> {
         if self.format == crate::FORMAT_VERSION {
+            return Ok(());
+        }
+        if self.format == 2 {
+            self.format = crate::FORMAT_VERSION;
             return Ok(());
         }
         let inventory = self.artifacts_with_legacy_derived(|relative| {
@@ -459,6 +493,7 @@ impl Manifest {
             let _ = std::fs::remove_file(&tmp);
             return Err(error.into());
         }
+        sync_dir(&store)?;
         Ok(())
     }
 
@@ -510,6 +545,7 @@ mod tests {
                 errors: vec![],
                 elapsed_ms: 0,
             }],
+            deleted: vec![],
         }
     }
 

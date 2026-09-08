@@ -31,8 +31,23 @@ pub fn run(a: CommitArgs) -> Result<i32> {
     if !snapshot.verify(false)?.ok() {
         bail!("store fails verification; refusing to stage or commit it");
     }
-    let msg = a.message.clone().unwrap_or_else(|| {
-        format!(
+    // A deletion newer than the last batch is what this commit records.
+    let deletion = m.deleted.last().filter(|d| d.created >= last.created);
+    let msg = a.message.clone().unwrap_or_else(|| match deletion {
+        Some(d) => format!(
+            "trajstore {}: delete {}\n\n{} rows, {} events, {} blobs ({} raw) removed over {} batches; adapter {} v{}\nsource {}",
+            m.store_id,
+            d.path,
+            d.paths,
+            d.events,
+            d.blobs,
+            d.blob_bytes,
+            m.batches.len(),
+            m.adapter.name,
+            m.adapter.version,
+            m.source
+        ),
+        None => format!(
             "trajstore {}: batch {} {}\n\n{} paths, {} new blobs ({} packed), adapter {} v{}, rules {} v{}\nsource {}",
             m.store_id,
             last.id,
@@ -45,7 +60,7 @@ pub fn run(a: CommitArgs) -> Result<i32> {
             m.rules.name,
             m.rules.version,
             m.source
-        )
+        ),
     });
     let git = |args: &[&str]| -> Result<()> {
         let st = Command::new("git")

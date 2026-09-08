@@ -22,6 +22,12 @@ pub fn run(stores: &[String], a: DeriveArgs) -> Result<i32> {
         _ => anyhow::bail!("this verb takes exactly one store"),
     };
     let root = resolve_store(store_arg, cfg.as_ref())?.canonicalize()?;
+    if let Some(work) = trajfs_core::delete::pending(&root) {
+        anyhow::bail!(
+            "a deletion of this store was interrupted ({} exists); run `traj delete --recover` first",
+            work.display()
+        );
+    }
     let _lock = trajfs_core::store::lock_store_exclusive(&root).with_context(|| {
         format!(
             "another traj command holds {}",

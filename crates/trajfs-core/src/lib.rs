@@ -7,6 +7,7 @@
 
 pub mod adapter;
 pub mod catalog;
+pub mod delete;
 pub mod events;
 pub mod hash;
 pub mod ingest;
@@ -17,7 +18,7 @@ pub mod store;
 pub mod walk;
 
 pub use adapter::{Adapter, NoAdapter};
-pub use manifest::{Batch, Manifest};
+pub use manifest::{Batch, Deletion, Manifest};
 pub use store::Store;
 
 /// sha256 digest.
@@ -88,4 +89,4 @@ pub const PACK_SEAL_BYTES: u64 = ARTIFACT_TARGET_BYTES;
 /// Row group size for catalog Parquet files.
 pub const ROW_GROUP: usize = 16_384;
 /// Store format version written to MANIFEST.json.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;

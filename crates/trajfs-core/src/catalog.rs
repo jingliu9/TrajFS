@@ -143,6 +143,8 @@ pub(crate) fn validate_segment_stem(stem: &str) -> Result<()> {
 }
 
 fn publish_segment(source: &Path, destination: &Path) -> Result<()> {
+    // Durable before it can be declared: the manifest is only published after its artifacts are on disk.
+    File::open(source)?.sync_all()?;
     std::fs::hard_link(source, destination)
         .with_context(|| format!("publish immutable artifact {}", destination.display()))?;
     std::fs::remove_file(source)?;
@@ -873,7 +875,7 @@ pub fn write_excluded(path: &Path, rows: &[crate::walk::Excluded], batch: u32) -
     for r in rows {
         p.append_value(&r.rel);
         size.append_value(r.size as i64);
-        rule.append_value(r.rule);
+        rule.append_value(&r.rule);
         bt.append_value(batch);
     }
     let b = RecordBatch::try_from_iter(vec![
@@ -1081,6 +1083,41 @@ pub fn read_index(segment: &Path, mut f: impl FnMut(Sha, Loc)) -> Result<()> {
     Ok(())
 }
 
+/// Read every exclusion record of one `excluded` segment.
+pub fn read_excluded(segment: &Path, mut f: impl FnMut(crate::walk::Excluded)) -> Result<()> {
+    let file = File::open(segment).with_context(|| format!("open {}", segment.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    require_columns(
+        builder.schema(),
+        &[
+            ("path", DataType::Utf8),
+            ("size", DataType::Int64),
+            ("rule", DataType::Utf8),
+        ],
+    )
+    .with_context(|| format!("excluded {}", segment.display()))?;
+    for batch in builder.with_batch_size(ROW_GROUP).build()? {
+        let batch = batch?;
+        require_non_null(&batch)?;
+        let by = |n: &str| {
+            batch
+                .column_by_name(n)
+                .unwrap_or_else(|| panic!("column {n}"))
+        };
+        let path = by("path").as_string::<i32>();
+        let size = by("size").as_primitive::<Int64Type>();
+        let rule = by("rule").as_string::<i32>();
+        for i in 0..batch.num_rows() {
+            f(crate::walk::Excluded {
+                rel: path.value(i).to_string(),
+                size: size.value(i).max(0) as u64,
+                rule: rule.value(i).to_string().into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_excluded(segment: &Path, deep: bool) -> Result<()> {
     let file = File::open(segment)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -1147,7 +1184,7 @@ mod tests {
             .map(|i| crate::walk::Excluded {
                 rel: format!("cache/{i:04}/long-excluded-name-{i:08x}.bin"),
                 size: i as u64,
-                rule: "test-rule",
+                rule: "test-rule".into(),
             })
             .collect();
         let index: Vec<IndexRow> = files

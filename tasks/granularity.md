@@ -13,7 +13,7 @@ A larger run can then be a collection of task stores.
 | Task | A problem or objective. The same task can be attempted more than once. |
 | Task execution / experiment | One attempt at that task, with a start and an eventual outcome or stop. An unfinished attempt is still one execution. |
 | Run | A container that may include several task executions. |
-| Round | One iteration of agent work within an execution. It is not independently disposable under the proposed deletion policy. |
+| Round | One iteration of agent work within an execution. Deletable as a subtree with `traj delete`, like any other path. |
 | Store | A `.trajstore` directory holding the archived paths, content, metadata, and batch history for a chosen source tree. |
 | Batch | One capture appended by `pack`. A batch can contain changes from several rounds or tasks if the source tree contains them. |
 
@@ -82,7 +82,7 @@ schemes. The physical destination and the manifest's display ID are also distinc
 | Concurrency | Ordinary readers and writers coordinate per store. Grouped tasks share that contention boundary. Separate stores can ingest independently, although Git commits still share one repository index. |
 | Git | `traj commit` commits the selected store's physical artifacts, not individual source paths. Larger stores can produce broader catalog or pack changes during maintenance. |
 | Sharing and retention | A task store is easy to copy or share without bundling unrelated tasks. Separate lifetimes and retention needs favor separate stores. |
-| Deletion, as planned | The deletion unit is the task execution, regardless of storage layout. A grouped store must preserve and rewrite the surviving tasks correctly; a task-sized store has much less surviving data to rewrite. |
+| Deletion | `traj delete <path>` removes one file or subtree from every batch by rebuilding the store. A task-sized store is deleted as a whole with Git; a grouped store rewrites the surviving tasks, which is more work but no less safe. |
 
 Store granularity is not a hard latency or memory guarantee. Query shape, catalog history, distinct content,
 cache state, and concurrent use still matter.
@@ -92,8 +92,8 @@ cache state, and concurrent use still matter.
 | Layout | When it makes sense | Main cost |
 |---|---|---|
 | One task execution per store | Default for independently completed, shared, or discarded experiments. Keep all agents and rounds together. | Identical content in different task stores is stored separately. |
-| Several tasks per store | Tasks intentionally share a storage and maintenance lifetime, or cross-task duplication is worth the coupling. | Task deletion needs explicit ownership and can require rewriting the larger archive; maintenance affects every task in it. |
-| One round, agent, or log per store | A specialized layout requiring an explicit higher-level grouping mechanism. | Fragments a task, loses cross-round deduplication, and makes task-atomic deletion a multi-store problem. Not the recommended default. |
+| Several tasks per store | Tasks intentionally share a storage and maintenance lifetime, or cross-task duplication is worth the coupling. | Deleting one task rewrites the whole store; maintenance affects every task in it. |
+| One round, agent, or log per store | A specialized layout requiring an explicit higher-level grouping mechanism. | Fragments a task, loses cross-round deduplication, and makes deleting a task a multi-store operation. Not the recommended default. |
 
 This recommendation is a convention, **not a boundary the current CLI enforces**. The current adapter identifies
 event-log formats and path attributes, not authoritative task ownership.
@@ -104,12 +104,14 @@ explicit migration into new stores, with verification and a Git checkpoint.
 
 ## Relationship to deletion
 
-The [deletion plan](PLAN-deletion.md) adds a stable task-execution identity and a complete ownership map.
-It must not mistake "one store" for "one task," or "one round" for an independently deletable experiment.
+Every unit above is a path prefix inside the store, and that is the deletion unit: `traj delete <path>` removes
+one file or one subtree from every batch. It does not infer task boundaries; the user names the path and the dry run
+shows what it covers. The [deletion plan](PLAN-deletion.md) gives the transaction protocol.
 
-For a single-task store, deleting its payloads can leave a tiny valid store envelope and a deletion record. For a
-grouped store, deletion removes that task's records across all batches and retains every other task's history and
-shared content. The first version refuses an execution fragmented across stores rather than deleting only one part.
+For a one-task-per-store layout, deleting the task is removing the store directory with Git and moving the raw tree
+aside; no command is needed. For a grouped store, `traj delete tasks/task-a-0001` rebuilds the store without that
+task, keeping every other task's history and any content they share. An execution split across several stores is
+deleted store by store.
 
 Git history remains in either layout. Deleting or repacking current artifacts does not shrink earlier Git history;
 rewriting a large grouped store can add new Git objects while old versions remain.

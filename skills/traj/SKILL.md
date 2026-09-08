@@ -13,6 +13,7 @@ Both roots come from `trajfs.toml`; `traj doctor` shows them and checks the setu
 
 - Never `git add` anything under `{{data_root}}` or any `rounds/round-*/` tree. The pre-commit hook rejects it; the fix is `traj pack` + `traj commit`.
 - Never delete or move anything under `{{data_root}}` or a `.trajstore` unless the owner asked explicitly; drops are moves into a dated `dropped/` directory, never deletes.
+- Removing one trajectory (a file or a subtree such as a round) from an archive is `traj delete -S <store> <path>` (dry run) then `--yes`, followed by `traj commit <store>`. It needs the store committed and unmounted; the earlier version stays in Git. Never edit a store by hand.
 - Never use `--no-verify` in scripts. Never write back into a store; `traj edit` is a temp-copy viewer and `traj mount` is read-only (the kernel enforces it).
 - Read from the store, not from the raw tree, whenever the store exists (`traj ls` answers in ms; `find` on the raw tree takes minutes).
 

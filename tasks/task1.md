@@ -77,8 +77,9 @@ now, make the plan to support deletion, the deltion granularity is one single tr
 write the plan to PLAN-deletion.md
 ===
 
-[Deletion plan](PLAN-deletion.md): remove one complete task execution, including all rounds and agents, while keeping
-Git history. The plan covers ownership, verified rewriting, recovery, reader coordination, and re-ingestion.
+[Deletion plan](PLAN-deletion.md): remove one trajectory, a file or a subtree such as a round or task, from every
+batch while keeping Git history. Refined 2026-09-06 into the transaction protocol for `pack` and `delete`
+(rebuild, deep-verify, atomic exchange, Git as the recovery anchor) and implemented as `traj delete`.
 
 ==
 R5:

@@ -62,6 +62,7 @@ impl Fixture {
                     version: 1,
                 },
                 batches: vec![],
+                deleted: vec![],
             },
             known: HashSet::new(),
         }

@@ -208,6 +208,31 @@ fn unescape_mount(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// Mountpoints of `fuse.traj` mounts that serve `store`: mounted on the store itself,
+/// or on a directory containing it (a multi-store mount of `store_root`). The mount's
+/// device name is `traj:<path>` (see `run`).
+pub fn mounts_serving(store: &Path) -> Vec<PathBuf> {
+    let want = crate::config::canon(store);
+    let text = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    mounts_serving_in(&text, &want)
+}
+
+fn mounts_serving_in(text: &str, want: &Path) -> Vec<PathBuf> {
+    text.lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace();
+            let dev = unescape_mount(it.next()?);
+            let mp = unescape_mount(it.next()?);
+            let ty = it.next()?;
+            if ty != "fuse.traj" {
+                return None;
+            }
+            let label = crate::config::canon(Path::new(dev.strip_prefix("traj:")?));
+            (want == label || want.starts_with(&label)).then(|| PathBuf::from(mp))
+        })
+        .collect()
+}
+
 /// Every `fuse.traj` mount of this user.
 pub fn traj_mounts() -> Vec<PathBuf> {
     let uid = std::fs::read_to_string("/proc/self/status")
@@ -357,7 +382,10 @@ mod linux {
                 .with_context(|| format!("read store_root {}", root.display()))?
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.join("MANIFEST.json").is_file())
+                .filter(|p| {
+                    p.join("MANIFEST.json").is_file()
+                        && trajfs_core::delete::pending_sibling(p).is_none()
+                })
                 .collect();
             dirs.sort();
             for d in &dirs {
@@ -672,6 +700,26 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mounts_serving_matches_the_store_and_multi_store_labels_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("stores");
+        let store = root.join("a.trajstore");
+        let other = root.join("b.trajstore");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let text = format!(
+            "traj:{} /mnt/a fuse.traj ro,user_id=1000 0 0\ntraj:{} /mnt/all fuse.traj ro 0 0\ntraj:{} /mnt/b fuse.traj ro 0 0\nsysfs /sys sysfs rw 0 0\n",
+            store.display(),
+            root.display(),
+            other.display()
+        );
+        let mut found = mounts_serving_in(&text, &crate::config::canon(&store));
+        found.sort();
+        assert_eq!(found, [PathBuf::from("/mnt/a"), PathBuf::from("/mnt/all")]);
+        assert!(mounts_serving_in("", &store).is_empty());
+    }
 
     #[test]
     fn review_invalid_utf8_settings_are_not_overwritten() {
