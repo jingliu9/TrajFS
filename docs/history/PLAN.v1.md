@@ -1,7 +1,7 @@
 # trajfs — design and test plan
 
-Status: draft 1, 2026-09-04. Derived from `docs/idea.md` and `docs/idea-review.md` (Review 1). Numbers quoted below are the
-Review 1 measurements on the fourth-grid run `claude-opus-4.8-678xazw/onesw-generation-20260902T033145Z`
+Status: draft 1, 2026-09-04. Derived from `idea.md` and `idea-review.md` (Review 1, same directory). Superseded by `../PLAN.md`. Numbers quoted below are the
+Review 1 measurements on the reference run
 (2.17 M paths, 12.9 GB kept, 23,864 distinct blobs, 3.05 GB distinct).
 
 ## 1. Problem and goals
@@ -39,7 +39,7 @@ an input, §4.2).
 | trajectories | stored as blobs **and** parsed into `events/*.parquet` (derived, rebuildable) | 72 % of distinct bytes are `events.jsonl`; they are row-structured |
 | shard size | packs and Parquet segments capped at ≤ 60 MiB (or a lower configured hook limit) | GitHub rejects > 100 MB, warns > 50 MB |
 | mutability | append-only; ingestion batches; a `MANIFEST.json` lists batches | additive commits; a batch is the unit of retry |
-| implementation language | Rust crate `trajfs`, binary `traj` (repo already has a Cargo `.gitignore`; onesw-gen is Rust) | one static binary for both hosts; Python scripts from Review 1 stay as the cross-implementation oracle in tests |
+| implementation language | Rust crate `trajfs`, binary `traj` (repo already has a Cargo `.gitignore`; the rounds-style runner is Rust) | one static binary for the measurement hosts; Python scripts from Review 1 stay as the cross-implementation oracle in tests |
 | Rust deps | `parquet` + `arrow` (write/read catalog), `zstd`, `sha2`, `rayon`, `clap`, `duckdb` (bundled) for `sql`/`ls`/`find` | |
 
 ## 3. Store layout
@@ -112,7 +112,7 @@ to small-blob chunks. Skip if it does not beat plain chunks by ≥ 20 %.
 ### 3.4 `events` schema (derived)
 
 Envelope only; agent-specific content stays in `payload_json` (Review 1 §3, "stable envelope + flexible payload").
-The observed envelope of onesw `events.jsonl` is `{type, timestamp, id, parentId, ephemeral, data}`.
+The observed envelope of the reference run's `events.jsonl` is `{type, timestamp, id, parentId, ephemeral, data}`.
 
 | column | type | source |
 |---|---|---|
@@ -133,8 +133,8 @@ Promotion rules live in one small module; changing them means re-running `traj i
 ### 3.5 `MANIFEST.json`
 
 ```json
-{"format": 1, "run_id": "...", "source": "/workspace/farm/onesw-gen-outputs/.../onesw-generation-...",
- "rules": {"name": "onesw-archive", "version": 3},
+{"format": 1, "run_id": "...", "source": "/data/experiments/task-1/run-42",
+ "rules": {"name": "my-runner-archive", "version": 3},
  "batches": [{"id": 1, "created": "2026-09-04T07:12:00Z", "paths": 2173722, "bytes": 12928153598,
               "new_blobs": 23864, "new_blob_bytes": 3053283334, "packs": [1, 12], "segments": ["files-0001"],
               "source_tree_sha256": "..."}]}
@@ -142,7 +142,7 @@ Promotion rules live in one small module; changing them means re-running `traj i
 
 ## 4. Write path: `traj pack`
 
-`traj pack <run-dir> --store <dir> [--rules onesw-archive] [--jobs N] [--batch-label L]`
+`traj pack <run-dir> --store <dir> [--rules <profile>] [--jobs N] [--batch-label L]`
 
 1. **Walk** the run tree (parallel, `rayon`), apply the rules (§4.2), producing the candidate path list. Symlinks are
    recorded, never followed. Hard links are ordinary files (dedupe makes them free).
@@ -170,9 +170,9 @@ Snapshots that the runner still writes (`selected/` as a copy) cost nothing but 
 
 ### 4.2 Rules
 
-The archive rules from `archfilter.py` (exclude `.cache`, `node_modules`, `target`, `build`, binaries, bulk measurement
+The archive rules from the reference run's Python archive filter (exclude `.cache`, `node_modules`, `target`, `build`, binaries, bulk measurement
 CSV/JSONL under `logs/`/`results/`/`experiments/`, files > 20 MB, ...) become a TOML rule set shipped in the crate
-(`rules/onesw-archive.toml`) and recorded by name+version in the manifest. `traj pack --rules none` stores
+(`rules/<profile>.toml`) and recorded by name+version in the manifest. `traj pack --rules none` stores
 everything. Excluded paths are written to `catalog/excluded-B[-P].parquet` (path, size, rule) so the manifest of what was
 left out travels with the store, as `ARCHIVE-EXCLUDED.tsv` does today.
 
@@ -206,12 +206,12 @@ run ≤ 10 s.
 - A batch is a commit: `git add <store>/catalog/*-B.parquet <store>/packs/* <store>/MANIFEST.json`. Only new files are
   added, so `git add`, `commit` and `push` cost is proportional to the batch (tens of files), not to the run.
 - A fresh clone contains every store; `traj` reads directly from the clone. Nothing needs to be extracted to browse.
-- The existing archive commits of raw trees (5.3 M paths on `explore/onesw-storage-dedupe`) stay as they are; the
+- The existing archive commits of raw trees (5.3 M paths on the experiment repository's archive branch) stay as they are; the
   first `traj` milestone re-packs those four runs from disk and the stores are committed beside them.
 
-## 7. Integration with onesw-gen
+## 7. Integration with the rounds-style runner
 
-Phase A (archive time, no runner change): `onesw/tools/archive-run.sh` calls `traj pack` per run at grid stop, or a
+Phase A (archive time, no runner change): the runner's archive script calls `traj pack` per run at grid stop, or a
 cron/`Monitor` hook calls it after every `rounds/round-N/selected-storage.json` appears (the file the runner writes when
 a round is finalised).
 
@@ -245,17 +245,17 @@ found to be a daily friction; the store format does not change.
 
 | id | deliverable | exit criterion |
 |---|---|---|
-| M0 | this plan; fixtures: a 200-file synthetic tree and the `round-0037` sample list; Python prototype kept as `review-bench/` oracle | fixtures committed |
+| M0 | this plan; fixtures: a 200-file synthetic tree and the `round-0037` sample list; Python prototype kept as an oracle (later dropped; its raw results are in `bench/`) | fixtures committed |
 | M1 | pack writer/reader, `cat`, `extract`, `verify` | T1–T3, T6 green; round-trip of `round-0037` byte-identical |
 | M2 | catalog + `ls/tree/find/du/stat` with DuckDB | T4 green; latency targets in §8 met on the reference run |
 | M3 | `grep`, `sql` with `blob()`/`text()`, `index-events` | T5, T7 green |
-| M4 | rules file, incremental batches, manifest, `.gitattributes`, archive of the four fourth-grid runs as stores | T8–T9 green; §8 size/file targets met; stores pushed |
-| M5 | onesw Phase A hook; docs (`README.md`, `OPERATIONS.md` §7) | one live round packed automatically |
+| M4 | rules file, incremental batches, manifest, `.gitattributes`, archive of the reference run and its three sibling runs as stores | T8–T9 green; §8 size/file targets met; stores pushed |
+| M5 | the runner's Phase A hook; docs (`README.md`, `OPERATIONS.md` §7) | one live round packed automatically |
 | M6 | FUSE (only if triggered by §9) | T10 |
 
 ## 11. Test plan
 
-Test code lives in `tests/` (Rust integration tests) and `tests/oracle/` (Python, uses the `review-bench` venv).
+Test code lives in `tests/` (Rust integration tests) and `tests/oracle/` (Python, the prototype's venv).
 `cargo test` runs T1–T7 on the synthetic fixture in < 60 s; `cargo test --features slow` adds the reference-run tests.
 
 **T1 Pack format, unit.** Chunk cutting at exactly 1 MiB; a 0-byte blob (kind = empty, no index row); a blob of
@@ -296,7 +296,7 @@ removes the orphan `.tmp` files and completes the batch.
 
 **T9 Git.** Commit a store to a scratch repo: every file ≤ 60 MiB by default; `git add` of batch 2 touches only batch-2 files;
 `.gitattributes` marks packs binary; clone the scratch repo and run T4/T5 against the clone unchanged. Push the four
-fourth-grid stores to a side branch and time push/clone against the raw-tree commits (`explore/onesw-storage-dedupe`).
+stores to a side branch and time push/clone against the raw-tree commits.
 
 **T10 FUSE (V2 only).** Mount the reference round; `diff -r` against the source tree; `grep -r` result equality;
 `ls -R` time ≤ 3× native; concurrent readers; unmount under open files.
@@ -305,5 +305,5 @@ fourth-grid stores to a side branch and time push/clone against the raw-tree com
 Python `pyarrow`, and `polars` without options; packs are decodable by the `zstd` CLI (`zstd -dc` of one frame
 extracted by offset).
 
-**Regression baseline.** `review-bench/fullrun.py` and `bench.py` are re-run on each milestone; their JSON is
-committed under `review-bench/history/<date>.json` so the §8 table can be compared over time.
+**Regression baseline.** The prototype scripts are re-run on each milestone; their JSON is committed under a
+history directory (`<date>.json`) so the §8 table can be compared over time.

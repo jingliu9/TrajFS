@@ -1,12 +1,13 @@
 # trajfs — design and test plan
 
-Status: draft 2.5, 2026-09-04 (2.1 adds §6.1, raw data outside the repo; 2.2 adds §12 usage procedure and §13 agent skill; 2.3 adds §2.1 language rationale; 2.4: Rust everywhere, no Python in build or test paths; 2.5: FUSE removed entirely, no shell or Python anywhere, git hook is the binary itself). Draft 1 is kept as `PLAN.v1.md` beside this file. Change in draft 2: the core is format-agnostic; everything
-that knows about a particular agent runner (onesw-gen rounds, GitHub Copilot CLI `events.jsonl`, Claude Code session
-logs, ...) lives in an **adapter**. The four fourth-grid onesw lanes remain the primary test dataset, not the design
-target.
+Status: draft 2.5, 2026-09-04 (2.1 adds §6.1, raw data outside the repo; 2.2 adds §12 usage procedure and §13 agent skill; 2.3 adds §2.1 language rationale; 2.4: Rust everywhere, no Python in build or test paths; 2.5: FUSE removed entirely, no shell or Python anywhere, git hook is the binary itself). Draft 1 is kept as `history/PLAN.v1.md`. Change in draft 2: the core is format-agnostic; everything
+that knows about a particular agent runner (rounds-style runner layouts, GitHub Copilot CLI `events.jsonl`, Claude Code
+session logs, ...) lives in an **adapter**. The reference run and its three sibling runs from the same grid remain the
+primary test dataset, not the design target.
 
-Derived from `idea.md` and `idea-review.md` (same directory) (Review 1). Numbers quoted are Review 1 measurements on the fourth-grid run
-`claude-opus-4.8-678xazw/onesw-generation-20260902T033145Z` (2.17 M paths, 12.9 GB kept, 23,864 distinct blobs).
+Derived from `history/idea.md` and `history/idea-review.md` (Review 1). Numbers quoted are Review 1 measurements on
+the reference run (2.17 M paths, 12.9 GB kept, 23,864 distinct blobs under the rules of the time; 2.14 M paths and
+12.0 GB retained under the current rules, §14).
 
 ## 1. Problem and goals
 
@@ -46,7 +47,7 @@ kept).
 | raw bytes are always kept | trajectories are stored as blobs *and* optionally parsed into derived tables | derived tables are rebuildable when an adapter changes; raw is the truth |
 | shard size | packs, Parquet segments, and serialized manifests capped at ≤ 60 MiB (or a lower configured hook limit) | stays safely below the 65 MiB hook and GitHub's 100 MB hard limit |
 | mutability | append-only batches listed in `MANIFEST.json` | additive commits; a batch is the unit of retry |
-| implementation | **Rust for everything**: store, catalog, adapters, CLI, hook logic, watcher, skill export, benchmarks, tests. No Python in the build or test path; the Review 1 Python scripts are historical artifacts under `review-bench/` | one static binary for any host; one toolchain; the owner's directive |
+| implementation | **Rust for everything**: store, catalog, adapters, CLI, hook logic, watcher, skill export, benchmarks, tests. No Python in the build or test path; the Review 1 Python scripts were exploratory and are not kept (their raw results are under `history/bench/`) | one static binary for any host; one toolchain; the owner's directive |
 | Rust deps | `parquet`+`arrow`, `zstd`, `sha2`, `rayon`, `clap`, `serde_json`, `duckdb` (bundled) | |
 
 ### 2.1 Language: Rust, as much as possible
@@ -56,7 +57,7 @@ The decision table above says Rust; the reasons, and what was weighed against it
 | | Rust | Python | Go |
 |---|---|---|---|
 | CLI start-up (matters: agents call `cat`/`stat` thousands of times) | ~2 ms | 150–300 ms (`import duckdb, pyarrow`) | ~2 ms |
-| deployment to the two hosts | one static binary, same toolchain as onesw-gen | needs a venv (system `pip` cannot create one here; `uv` was required for the prototype) | one binary |
+| deployment to the measurement hosts | one static binary, same toolchain as the rounds-style runner | needs a venv (system `pip` cannot create one here; `uv` was required for the prototype) | one binary |
 | Parquet / zstd / sha / parallel walk | `parquet`+`arrow`, `zstd`, `sha2`, `rayon`: mature | `pyarrow`, `zstandard`, `multiprocessing`: mature (the prototype) | Parquet libraries are weaker |
 | DuckDB embedding | `duckdb` crate, `bundled` feature: ~10 min first build, ~50 MB binary | first-class | via CGO only |
 | in-place risk | none; the store format is language-neutral Parquet + zstd, so a rewrite in another language is always possible | | |
@@ -67,14 +68,14 @@ Parquet and DuckDB. Decision: **everything is Rust**, including what is usually 
 
 - the git pre-commit hook is the `traj` binary itself (a symlink `.git/hooks/pre-commit -> traj`; the binary dispatches on `argv[0]`), no shell stub, no script of any kind;
 - `traj watch` uses `notify` (inotify) in-process, no cron or shell loop;
-- `traj bench` replaces `review-bench/*.py` and writes the same JSON shape to `review-bench/history/`;
-- tests are Rust (`proptest` for T2, `assert_cmd` for CLI tests, `criterion` for latency targets);
+- `traj bench` replaces the Review 1 Python scripts and writes JSON into a directory of the caller's choice (the README uses `bench-results/`);
+- tests are Rust (`proptest` for the round trip, `assert_cmd` for CLI tests, `criterion` for latency targets);
 - no shell and no Python anywhere: no `sh -c`, no scripts in the repo, hooks, tests or CI; independent checks spawn
   existing binaries directly with `std::process::Command` (`zstd`, `sha256sum`, the DuckDB CLI) and compare trees in
   Rust (`walkdir`) instead of `diff -r`;
 
 Crate layout (Cargo workspace): `crates/trajfs-core` (pack, catalog, manifest, verify), `crates/trajfs-adapters`
-(`none`, `jsonl`, `copilot-cli`, `claude-code`, `onesw`), `crates/trajfs-query` (DuckDB session, views, `blob()`/`text()`),
+(`none`, `jsonl`, `copilot-cli`, `claude-code`; runner layouts are declared TOML, §3.6), `crates/trajfs-query` (DuckDB session, views, `blob()`/`text()`),
 `crates/traj` (the CLI, hook, watch, skill export, bench). If the bundled DuckDB build
 proves too heavy for the hot verbs, `ls/find/stat/cat` read the catalog with `arrow`/`parquet` directly and DuckDB stays
 only behind `sql`; that split changes no format.
@@ -117,7 +118,7 @@ than relying on lexical filename order.
 | sha | fixed_size_binary(32) | sha256 of content (symlink: of the target string) |
 | mtime_ns | int64 | source mtime, informational |
 | batch | uint32 | ingestion batch |
-| attrs | map<utf8, utf8> | **adapter-provided path attributes**, empty when no adapter (onesw: `round=37`, `role=builder`) |
+| attrs | map<utf8, utf8> | **adapter-provided path attributes**, empty when no adapter (rounds-style runner: `round=37`, `role=builder`) |
 
 Adapters may not add core columns; anything structured beyond `attrs` goes to `derived/`.
 
@@ -152,16 +153,16 @@ it beats plain chunks by ≥ 20 %.
 ### 3.4 `MANIFEST.json`
 
 ```json
-{"format": 2, "store_id": "...", "source": "/workspace/farm/onesw-gen-outputs/.../onesw-generation-...",
- "adapter": {"name": "onesw", "version": 1}, "rules": {"name": "onesw-archive", "version": 3},
+{"format": 2, "store_id": "...", "source": "/data/experiments/task-1/run-42",
+ "adapter": {"name": "my-runner", "version": 1}, "rules": {"name": "no-build-products", "version": 1},
  "batches": [{"id": 1, "created": "2026-09-04T07:12:00Z", "label": "rounds 1-38", "paths": 2173722,
               "bytes": 12928153598, "new_blobs": 23864, "new_blob_bytes": 3053283334,
-              "packs": [1, 12], "segments": ["files-0001"], "derived": ["onesw/events-0001"],
+              "packs": [1, 12], "segments": ["files-0001"], "derived": ["my-runner/events-0001"],
               "source_tree_sha256": "...", "errors": []}]}
 ```
 
 Format 3 (2026-09-06) adds an optional `deleted` list: paths removed by `traj delete`, which `pack` skips from then
-on; the deletion protocol is in `tasks/PLAN-deletion.md`. Format 2 makes every derived artifact manifest-authoritative. Readers remain compatible with format-1 stores,
+on; the deletion protocol is in `PLAN-deletion.md`. Format 2 makes every derived artifact manifest-authoritative. Readers remain compatible with format-1 stores,
 including the legacy `derived/<adapter>/events-0000.parquet` full-rebuild convention. `adapter` may be
 `{"name": "none"}`; every verb in §5 works without one.
 
@@ -232,8 +233,8 @@ slashes, `.` and `..` are rejected before creating or resolving derived paths.
 
 `traj init` takes `--adapter <path|builtin>`, or `--scaffold-adapter` to write `trajfs/adapter.toml` and
 `trajfs/rules.toml` templates; when neither is given on a terminal it asks whether to scaffold, and the exported
-skill tells the repo's agent how to complete the file. The onesw adapter therefore lives at
-`farm/onesw/trajfs/{adapter,rules}.toml`, and trajfs's own tests use a generic "rounds layout" fixture.
+skill tells the repo's agent how to complete the file. The rounds-style runner's adapter therefore lives in that
+runner's own repository as `trajfs/{adapter,rules}.toml`, and trajfs's own tests use a generic "rounds layout" fixture.
 
 The trait behind this (`trajfs_core::Adapter`) stays available for compiled adapters if a format ever needs code
 that TOML cannot express; the `Declared` implementation covers attrs, trajectories, readiness, rule profile and
@@ -276,8 +277,9 @@ rule could select a descendant. Explicit `always_exclude` subtree globs still ta
 ### 4.2 Rules
 
 A rule profile is TOML: `exclude_dirs`, `exclude_ext`, `exclude_under = [{dirs, ext, max_bytes}]`, `max_bytes`,
-`always_keep` globs, `elf_min_bytes`. Profiles ship in the crate (`rules/onesw-archive.toml` ports `archfilter.py`;
-`rules/none.toml` keeps everything; `rules/no-build-products.toml` is the generic default). The profile name and
+`always_keep` globs, `elf_min_bytes`. Two profiles ship in the crate (`rules/none.toml` keeps everything;
+`rules/no-build-products.toml` is the generic default); a runner's own profile, such as the TOML port of the reference
+run's original Python archive filter, lives beside its adapter (§3.6). The profile name and
 version go to the manifest, the excluded list to `catalog/excluded-B[-P].parquet`.
 
 ## 5. Read path: the CLI
@@ -296,7 +298,7 @@ All verbs take `--store <dir>` (or `TRAJ_STORE`) and a path relative to the stor
 | `traj grep [-e re]... [--name g] [--path prefix] [-l] [-c] [-a]` | regex over each distinct blob once, hits mapped to every path | index + packs |
 | `traj sql "<query>"` | DuckDB with views `files`, `dirs`, `blobs` (index), `excluded`, every `derived/*` table, and functions `blob(sha) → BLOB`, `text(sha) → VARCHAR` | all |
 | `traj derive [--adapter A] [--force]` | (re)build derived tables from packs | packs → derived |
-| `traj delete <path> [--yes] [--recover]` | remove one file or subtree from every batch: rebuild, deep-verify, atomic swap (`tasks/PLAN-deletion.md`) | store → store |
+| `traj delete <path> [--yes] [--recover]` | remove one file or subtree from every batch: rebuild, deep-verify, atomic swap (`PLAN-deletion.md`) | store → store |
 | `traj verify [--deep]` | catalog ↔ index ↔ packs consistency; `--deep` re-hashes every blob | all |
 | `traj edit <path>` | extract to a temp file, run `$EDITOR`, print a diff; never written back | |
 | `traj mount [-S S]... <mnt> [--daemon]` | read-only FUSE tree of one store, or one directory per store under `store_root`; new batches and stores appear without remounting (`PLAN-fuse.md`) | catalog + packs |
@@ -312,14 +314,14 @@ index load; `extract` of a 100 K-file subtree ≤ 30 s; `grep` over all distinct
   and `-delta`.
 - A batch is a commit touching only its new files, so `add`/`commit`/`push` cost is proportional to the batch.
 - A clone is directly readable by `traj`; nothing is extracted to browse.
-- Existing raw-tree archive commits (5.3 M paths on `explore/onesw-storage-dedupe`) stay; M4 re-packs those runs
+- Existing raw-tree archive commits (5.3 M paths on the experiment repository's archive branch) stay; M4 re-packs those runs
   from disk into stores committed beside them.
 
 ### 6.1 Raw data lives outside the repo; the repo holds only stores
 
-The four fourth-grid trees were committed raw because the runner writes into the repo by default: onesw-gen's
-`output_root` defaults to `onesw-gen-outputs` relative to the working directory (`onesw-gen/src/config.rs:33`), and the
-grid TOML does not override it, and the farm repo's `.gitignore` does not exclude it. Nothing prevented `git add` of a
+The reference run and its siblings were committed raw because the runner writes into the repo by default: the
+rounds-style runner's `output_root` defaults to a directory relative to the working directory, the grid configuration
+did not override it, and the experiment repository's `.gitignore` did not exclude it. Nothing prevented `git add` of a
 2 M-path tree. The fix is structural, not a convention:
 
 **Two roots, both mandatory, never nested.**
@@ -334,13 +336,13 @@ Configuration is one file, `trajfs.toml`, found by walking up from the current d
 ```toml
 data_root  = "/workspace/runs"        # absolute; required, no default
 store_root = "stores"                 # relative to the repo root that contains this file
-adapter    = "onesw"                  # default adapter for pack/watch
-rules      = "onesw-archive"
+adapter    = "trajfs/adapter.toml"    # default adapter for pack/watch
+rules      = "no-build-products"
 ```
 
 **Enforcement, in order of where a mistake would be caught:**
 
-1. **Runner side.** onesw-gen's `output_root` becomes required in the grid TOML (no default) and the dispatcher refuses
+1. **Runner side.** The rounds-style runner's `output_root` becomes required in its grid configuration (no default) and the dispatcher refuses
    to start when it resolves inside a git work tree (`git rev-parse --show-toplevel` succeeds from that path) unless
    `allow_output_in_repo = true` is set explicitly. Same check for any other runner that gains a trajfs hook.
 2. **Pack side.** `traj pack` refuses a `--store` path under `data_root` and refuses a source under `store_root`; it
@@ -357,8 +359,9 @@ rules      = "onesw-archive"
 5. **Doctor.** `traj doctor` prints both roots, checks nesting, git status of each, hook presence, and any raw-run
    pattern already tracked in the repo.
 
-**Migration of the farm repo** (owner's call, per the no-deletion rule): move the raw trees already on disk from
-`onesw-gen-outputs/` to `data_root` (a move, then a pointer file), set `output_root` in the grid TOML, run `traj pack`
+**Migration of the experiment repository** (owner's call, per the no-deletion rule): move the raw trees already on disk
+from the runner's default output directory to `data_root` (a move, then a pointer file), set `output_root` in the grid
+configuration, run `traj pack`
 for each run into `stores/`, and commit the stores. The raw-tree commits already in history stay in history; the
 working tree simply stops tracking them (`git rm --cached`, no data touched).
 
@@ -371,10 +374,11 @@ discouraged.
 
 Generic: `traj pack` after a run, or `traj watch` during it. The runner does not need to know trajfs exists.
 
-onesw-gen (Phase A): the only runner change is the `output_root` guard of §6.1 (required, outside any git work tree). The `onesw` adapter's `batch_ready` fires on a new
-`rounds/round-N/selected-storage.json`; `onesw/tools/archive-run.sh` calls `traj pack` per lane at grid stop.
+The rounds-style runner (Phase A): the only runner change is the `output_root` guard of §6.1 (required, outside any git
+work tree). Its adapter's `batch_ready` fires on a new `rounds/round-N/selected-storage.json`; the runner's archive
+script calls `traj pack` per run at grid stop.
 
-onesw-gen (Phase B, later, adapter-specific): the `selected/` snapshot becomes a manifest of shas and
+The rounds-style runner (Phase B, later, adapter-specific): the `selected/` snapshot becomes a manifest of shas and
 `seed_builder_workspace` extracts from the store, removing the on-disk 2× copy and reusing the store's sha check as the
 seed integrity check. Out of scope for V1.
 
@@ -395,90 +399,93 @@ Prototype numbers on the reference run; the Rust build must meet or beat them.
 
 ## 9. Reserved
 
-The read-only FUSE projection is designed, built and measured in `PLAN-fuse.md` (2026-09-04): a mount over the same catalog and packs, never the storage format. `vscode-viewer.md` records why a mount was chosen over an editor plugin (not pursued).
+The read-only FUSE projection is designed, built and measured in `PLAN-fuse.md` (2026-09-04): a mount over the same catalog and packs, never the storage format. `history/vscode-viewer.md` records why a mount was chosen over an editor plugin (not pursued).
 
 ## 10. Milestones
 
 | id | deliverable | exit criterion |
 |---|---|---|
-| M0 | this plan; Cargo workspace skeleton (§2.1 crates) building an empty `traj --help`; fixtures (§11.0) | `cargo build --release` on both hosts; fixtures committed |
-| M1 | pack writer/reader, `cat`, `extract`, `verify`, adapter `none` | T1–T3, T6 green; `round-0037` round-trips byte-identical |
-| M2 | catalog + `ls/tree/find/du/stat` (DuckDB) | T4 green; §8 latency targets met |
-| M3 | `grep`, `sql` with `blob()/text()`, `derive`, adapters `jsonl`, `copilot-cli`, `claude-code` | T5 green on both real formats |
-| M4 | rule profiles, incremental batches, manifest, `traj init/commit/doctor` + hook (§6.1), declared adapters + scaffold, onesw-gen `output_root` guard; four fourth-grid stores committed | T7–T9, T9b, T9c green; §8 size/file targets met |
-| M5 | `traj watch`, `traj init/skill export`, onesw Phase A hook; `README.md`; `OPERATIONS.md` §7 | one live round packed automatically; T11 green; skill installed in the farm repo |
-| M6 | `traj mount`/`umount`, `doctor` mounts line, `mount_root`; `PLAN-fuse.md` | T10 green; a round of the reference run opens in VS Code over Remote-SSH; `PLAN-fuse.md` §16 numbers recorded |
+| M0 | this plan; Cargo workspace skeleton (§2.1 crates) building an empty `traj --help`; fixtures (§11.0) | `cargo build --release` on the measurement hosts; fixtures committed |
+| M1 | pack writer/reader, `cat`, `extract`, `verify`, adapter `none` | pack-format, round-trip, integrity and reference-round tests green; `round-0037` round-trips byte-identical |
+| M2 | catalog + `ls/tree/find/du/stat` (DuckDB) | catalog-semantics tests green; §8 latency targets met |
+| M3 | `grep`, `sql` with `blob()/text()`, `derive`, adapters `jsonl`, `copilot-cli`, `claude-code` | grep/sql/derived-table tests green on both real formats |
+| M4 | rule profiles, incremental batches, manifest, `traj init/commit/doctor` + hook (§6.1), declared adapters + scaffold, the runner's `output_root` guard; the reference run and its siblings committed as stores | whole-run, incremental, git, separation and scaffold tests green; §8 size/file targets met |
+| M5 | `traj watch`, `traj init/skill export`, the runner's Phase A hook; `README.md`; `OPERATIONS.md` §7 | one live round packed automatically; skill test green; skill installed in the experiment repository |
+| M6 | `traj mount`/`umount`, `doctor` mounts line, `mount_root`; `PLAN-fuse.md` | mount tests green; a round of the reference run opens in VS Code over Remote-SSH; `PLAN-fuse.md` §16 numbers recorded |
 
 ## 11. Test plan
 
 Test code is Rust only: unit tests in each crate, integration tests in `crates/traj/tests/` (`assert_cmd`), property
-tests with `proptest`, latency checks with `criterion` (`cargo bench -p traj`). `cargo test --release` runs the
-synthetic-fixture tests in < 10 s; `cargo test --release --features slow -p traj --test cli slow::` runs the
-real-dataset tests and needs `TRAJ_SLOW_SRC` (a run directory) and `TRAJ_SLOW_ADAPTER` (its adapter TOML); their
-expected counts are recorded on first run under `crates/traj/tests/expected/` and asserted afterwards.
+tests with `proptest`, latency checks with `criterion` (`cargo bench -p traj`). Integration tests live under
+`crates/traj/tests/`, one file per item named after what it verifies (for example `mount.rs`, `pack_round_trip.rs`,
+`reference_dataset.rs`); the reference-dataset tests are marked `#[ignore]` and are enabled through `TRAJ_SLOW_SRC` (a
+run directory), `TRAJ_SLOW_ADAPTER` (its adapter TOML) and `TRAJ_SLOW_NAME` (the name under which expected counts are
+recorded). `cargo test --release` runs the synthetic-fixture tests in < 10 s; the reference-dataset expected counts are
+recorded on first run under `crates/traj/tests/expected/` and asserted afterwards.
 
 **11.0 Fixtures.**
 - `synthetic/`: generated 200-file tree covering every kind/mode, unicode names, duplicates, an empty dir, a
   symlink chain; deterministic seed.
-- `onesw` dataset: the four fourth-grid lanes on disk (rank 1 `claude-opus-4.8-678xazw`, rank 2 `gpt-5.5-p3jmfrc`,
-  rank 3 `claude-opus-4.6-1m-kVtKs9a`, rank 4 `gpt-5.5-GLihDpe`, all `onesw-generation-20260902T033145Z`) and the
-  `round-0037` sample list. Expected counts are recorded in `tests/expected/onesw.json`.
+- reference dataset: the reference run and its three sibling runs from the same grid (rounds-style layout, on disk on
+  the measurement host; Tasks A–D in the README) and the `round-0037` sample list. Expected counts are recorded under
+  `crates/traj/tests/expected/<TRAJ_SLOW_NAME>.*.json`.
 - `claude-code` dataset: session JSONL files from `~/.claude/projects/` on the dev host (copied under a fixture dir;
   contents are not asserted on, only envelope parsing).
 - `generic` dataset: a synthetic tree of plain logs plus JSONL with heterogeneous keys, no adapter.
 
-**T1 Pack format (unit).** Frame cut at exactly 1 MiB; 0-byte blob (kind 2, no index row); 1 MiB, 1 MiB + 1 and
+**Pack format (unit).** Frame cut at exactly 1 MiB; 0-byte blob (kind 2, no index row); 1 MiB, 1 MiB + 1 and
 100 MiB blobs (multi-part); packs remain below the 60 MiB target; magic and frame boundaries validated by the `zstd` CLI; every index
 row points inside its pack.
 
-**T2 Round trip (property-based).** Random trees (proptest): depth ≤ 8, unicode/space/dot names, kinds file/symlink/
+**Round trip (property-based).** Random trees (proptest): depth ≤ 8, unicode/space/dot names, kinds file/symlink/
 empty, modes 644/755, sizes from the measured distribution (p50 40 B, p99 80 KB, a few multi-MB), 30 % duplicate
 contents. `pack → extract` is byte-identical (`diff -r --no-dereference`), modes and symlink targets equal;
-`--hardlink-dedupe` yields `nlink > 1` only for identical blobs. Runs with adapter `none` and with `onesw` (attrs must
+`--hardlink-dedupe` yields `nlink > 1` only for identical blobs. Runs with adapter `none` and with the rounds-style adapter (attrs must
 not change bytes).
 
-**T3 Integrity.** Flip one byte in a pack → `verify --deep` names the frame and every affected path; `cat` of an
+**Integrity.** Flip one byte in a pack → `verify --deep` names the frame and every affected path; `cat` of an
 affected path fails unless `--no-verify`. Truncated pack → `verify` fails, other packs readable. Missing
 manifest-declared catalog, index, pack, or derived artifacts → quick and deep verification refuse the store. Missing
 `MANIFEST.json` → every verb refuses clearly.
 
-**T4 Catalog semantics.** On the synthetic and generic fixtures, `ls`, `tree`, `find`, `du`, `stat` equal the same
+**Catalog semantics.** On the synthetic and generic fixtures, `ls`, `tree`, `find`, `du`, `stat` equal the same
 operations on the extracted tree (`ls -A`, `find`, `du -b --apparent-size`), including empty directories (present only
-in `dirs`). With adapter `none`, `attrs` is empty and `find --attr` matches nothing; with `onesw`, `find --attr
+in `dirs`). With adapter `none`, `attrs` is empty and `find --attr` matches nothing; with the rounds-style adapter, `find --attr
 round=37 --attr role=reviewer` returns exactly the paths under `rounds/round-0037/reviewer/`.
 
-**T5 grep, sql, derived tables.** `traj grep -l P` equals `grep -rl P` on the extracted tree for 20 random patterns,
+**grep, sql, derived tables.** `traj grep -l P` equals `grep -rl P` on the extracted tree for 20 random patterns,
 one of which matches only a duplicated blob (hit-to-all-paths mapping); binary blobs skipped unless `-a`. `sql` views
-exist; `blob(sha)` equals `cat`. Derived `events`: (a) `copilot-cli` on the onesw dataset: row count = total lines of
+exist; `blob(sha)` equals `cat`. Derived `events`: (a) `copilot-cli` on the reference dataset: row count = total lines of
 all `events.jsonl`; `type`/`ts`/`id`/`parent_id` round-trip; `payload_json` re-parses to the original `data`;
 (b) `claude-code` on the session fixture: rows = lines, `actor` ∈ {user, assistant, system, tool}, `parent_id` chains
 resolve; (c) `jsonl` on the generic fixture with heterogeneous keys: no row lost, unknown keys land in `payload_json`;
 (d) re-running `derive` with a bumped adapter version replaces the derived segment and leaves packs and catalog
 unchanged (byte-compare).
 
-**T6 Reference round (slow).** Pack `rounds/round-0037` of rank 1: 107,449 paths, 7,418 distinct blobs; extract
+**Reference round (reference dataset, `#[ignore]`).** Pack `rounds/round-0037` of the reference run: 107,449 paths, 7,418 distinct blobs; extract
 byte-identical; store ≤ 30 MB; `cat` p50 ≤ 5 ms over 1,000 random paths after warm-up.
 
-**T7 Whole runs (slow).** Pack all four lanes. Rank 1: 2,173,722 paths (2,173,703 files + 19 symlinks), 23,864 distinct
-blobs, 3.05 GB distinct, all §8 targets, `verify --deep` clean, one full round extracted and `diff -r` clean. The other
-three lanes: counts recorded on first run into `tests/expected/onesw.json` and asserted thereafter. Compatibility:
+**Whole runs (reference dataset, `#[ignore]`).** Pack all four runs. The reference run: 2,173,722 paths (2,173,703 files +
+19 symlinks), 23,864 distinct blobs, 3.05 GB distinct, all §8 targets, `verify --deep` clean, one full round extracted
+and `diff -r` clean. The other three runs: counts recorded on first run under `crates/traj/tests/expected/` and asserted
+thereafter. Compatibility:
 every Parquet file readable by the DuckDB CLI with no options; one
 frame cut from a pack by offset decodes with `zstd -dc`; every sha in the catalog equals `sha256sum` of the extracted
 file.
 
-**T8 Incremental batches.** Pack rounds 1–10 then 1–11 of one lane: batch 2 holds only round-11 paths and only blobs
+**Incremental batches.** Pack rounds 1–10 then 1–11 of one run: batch 2 holds only round-11 paths and only blobs
 absent from batch 1; manifest lists two batches; a path modified between batches is recorded again and `stat` shows the
 newest; SIGKILL during pack leaves the store readable and `verify` clean; the next `pack` removes orphans and completes
-the batch. `traj watch` on a copy of a lane packs when a `selected-storage.json` is added.
+the batch. `traj watch` on a copy of a run packs when a `selected-storage.json` is added.
 
-**T9 Git.** Commit a store to a scratch repo: every file ≤ 60 MiB by default; adding batch 2 stages only batch-2 files; packs are
-binary per `.gitattributes`; a clone passes T4/T5 unchanged. Push the four stores to a side branch and record push and
-clone times next to the raw-tree commits on `explore/onesw-storage-dedupe`.
+**Git.** Commit a store to a scratch repo: every file ≤ 60 MiB by default; adding batch 2 stages only batch-2 files; packs are
+binary per `.gitattributes`; a clone passes the catalog-semantics and grep/sql tests unchanged. Push the four stores to a
+side branch and record push and clone times next to the existing raw-tree commits.
 
-**T9b Separation.** `traj pack --store <data_root>/x` and `traj pack <store_root>/y` are refused; `traj init` installs the hook; a commit adding `rounds/round-0001/…` or a 65 MiB file is rejected by the hook with the suggested `traj pack` command; `traj commit` stages exactly the batch files; `traj doctor` flags a nested root and a tracked raw-run path; onesw-gen refuses to start with `output_root` inside the repo and starts with it outside.
+**Separation and hook.** `traj pack --store <data_root>/x` and `traj pack <store_root>/y` are refused; `traj init` installs the hook; a commit adding `rounds/round-0001/…` or a 65 MiB file is rejected by the hook with the suggested `traj pack` command; `traj commit` stages exactly the batch files; `traj doctor` flags a nested root and a tracked raw-run path; the rounds-style runner refuses to start with `output_root` inside the repo and starts with it outside.
 
-**Regression baseline.** `traj bench --store S --source <run>` is run at each milestone; results go to
-`review-bench/history/<date>.json` (same keys as the Review 1 JSON) for comparison with §8.
+**Regression baseline.** `traj bench -S S --source <run>` is run at each milestone; results go to
+`bench-results/<date>.json` for comparison with §8.
 
 ## 12. Usage procedure
 
@@ -488,15 +495,15 @@ correct command on refusal, so the procedure is also discoverable from the tool 
 **12.1 One-time setup of a repo (operator).**
 
 ```
-traj init --data-root /workspace/runs --store-root stores --adapter onesw --rules onesw-archive
+traj init --data-root /workspace/runs --store-root stores --adapter trajfs/adapter.toml --rules no-build-products
 #  writes trajfs.toml, stores/.gitkeep, .gitattributes, the pre-commit hook, /workspace/runs/.gitignore
 #  and installs the agent skill (§13) under .claude/skills/traj/ and an AGENTS.md section
 traj doctor            # both roots, nesting, hook, skill version, tracked raw-run paths: all must be OK
 git add trajfs.toml stores/.gitkeep .gitattributes .claude/skills/traj AGENTS.md && git commit -m "trajfs: init"
 ```
 
-Runner config: point the runner's output root at `data_root` (onesw-gen: `output_root = "/workspace/runs"` in the
-grid TOML; the dispatcher refuses to start otherwise, §6.1).
+Runner config: point the runner's output root at `data_root` (rounds-style runner: `output_root = "/workspace/runs"` in
+its grid configuration; the dispatcher refuses to start otherwise, §6.1).
 
 **12.2 During a run (automatic).**
 
@@ -504,7 +511,7 @@ grid TOML; the dispatcher refuses to start otherwise, §6.1).
 traj watch /workspace/runs --store-root stores          # one per host; systemd unit or started with the dispatcher
 ```
 
-Each time the adapter reports a batch ready (onesw: a new `rounds/round-N/selected-storage.json`), `watch` packs that
+Each time the adapter reports a batch ready (rounds-style runner: a new `rounds/round-N/selected-storage.json`), `watch` packs that
 run's new paths into its store and, with `--commit --push`, commits and pushes the batch. Without `--commit` the store
 grows locally and 12.3 commits it. `watch` never reads a round that is still being written and never touches the raw
 tree.
@@ -546,7 +553,7 @@ Nothing in 12.4–12.5 needs the raw tree, so a fresh clone of the repo is enoug
 **12.6 What is deliberately impossible.** Committing raw run trees (hook + roots, §6.1); modifying stored content
 (append-only; `edit` never writes back); deleting by accident (`delete` is the only deleting verb: it is a dry run
 unless `--yes` is given, refuses an uncommitted or mounted store, and never modifies the store in place, see
-`tasks/PLAN-deletion.md`); nesting the roots.
+`PLAN-deletion.md`); nesting the roots.
 
 ## 13. Agent skill
 
@@ -569,9 +576,9 @@ running `git add` on outputs. So the binary ships the skill and installs it:
 - The skill is data, not policy: it repeats what the hook and the roots already enforce, so an agent that ignores it
   still cannot do damage; it only wastes time.
 
-**T10 Mount.** Ten tests in `cli.rs` (`t10::…`) plus the slow `t10k` against a real store: byte-identical to `extract` (modes, symlinks, empty files, exec bits), `ls -A`/`find`/`du` equal to the catalog verbs, read-only (`EROFS` for every write path), xattrs, `grep -rlE` equal to `traj grep`, eight concurrent readers, a batch landing behind a live mount (new paths, re-recorded content, old handles), corruption as `EIO` for the affected file only, SIGTERM/SIGKILL/stale/busy/lazy/daemon lifecycle, refusals, the multi-store root. Details and bounds: `PLAN-fuse.md` §12.
+**Mount.** Ten mount tests plus the `#[ignore]`d reference-store test against a real store: byte-identical to `extract` (modes, symlinks, empty files, exec bits), `ls -A`/`find`/`du` equal to the catalog verbs, read-only (`EROFS` for every write path), xattrs, `grep -rlE` equal to `traj grep`, eight concurrent readers, a batch landing behind a live mount (new paths, re-recorded content, old handles), corruption as `EIO` for the affected file only, SIGTERM/SIGKILL/stale/busy/lazy/daemon lifecycle, refusals, the multi-store root. Details and bounds: `PLAN-fuse.md` §12.
 
-**T11 Skill.** `traj skill export` renders without placeholders; every command in the skill's examples is executed
+**Skill.** `traj skill export` renders without placeholders; every command in the skill's examples is executed
 against the synthetic fixture store in tests and must exit 0 with the documented output shape; every verb named in the
 skill exists in `traj --help` and vice versa; `doctor` warns on a version mismatch; `init` on a repo with an existing
 `.claude/skills/traj/SKILL.md` updates it in place and leaves other skills untouched.
@@ -580,28 +587,29 @@ skill exists in `traj --help` and vice versa; `doctor` warns on a version mismat
 
 Built and tested in this repo: Cargo workspace `crates/trajfs-core`, `crates/trajfs-adapters`, `crates/traj`
 (binary 55 MB stripped, DuckDB bundled, ~4 min clean release build). `cargo test --release`: 13 tests green
-(core unit tests, adapter tests, CLI tests T1–T5, T6 when `TRAJ_SLOW_SRC` is set, T8, T9b, T11).
+(core unit tests, adapter tests, the CLI tests from pack format through grep/sql, the reference round when
+`TRAJ_SLOW_SRC` is set, incremental batches, separation and hook, skill).
 
 Implemented verbs: `init`, `doctor`, `pack`, `watch` (polling), `ls`, `tree`, `find`, `du`, `stat`, `cat`,
 `extract`, `edit`, `grep`, `sql` (with `text(sha)` / `blob(sha)`), `derive`, `verify`, `commit`, `skill export|verbs`,
 `hook pre-commit|check-tree` (the hook is a symlink to the binary). Built-in adapters: `none`, `jsonl`, `copilot-cli`,
-`claude-code`; runner layouts are TOML files in the runner's repo (§3.6); the onesw one is
-`farm/onesw/trajfs/adapter.toml` + `rules.toml`. Built-in rule profiles: `none`, `no-build-products`.
+`claude-code`; runner layouts are TOML files in the runner's repo (§3.6); the rounds-style runner's is
+`trajfs/adapter.toml` + `rules.toml` in its repository. Built-in rule profiles: `none`, `no-build-products`.
 
-Measured on fwf2-n0 against the fourth-grid lanes (stores under `/workspace/trajstores-test/`, outside any repo;
-rank 2 is on the other host and was not packed):
+Measured on the measurement host against the reference run and its sibling runs (the README calls them Tasks A–D;
+stores in a scratch directory outside any repo; Task B lived on another host and was not packed):
 
-| lane | paths | kept bytes | distinct blobs | packs | catalog | derived events | pack time | verify --deep |
+| run | paths | kept bytes | distinct blobs | packs | catalog | derived events | pack time | verify --deep |
 |---|---|---|---|---|---|---|---|---|
-| rank 1 (claude-opus-4.8) | 2,140,904 | 12.0 GB | 23,685 | 454 MB (8 files) | 27 MB | 359 MB | 118 s | 21 s |
-| rank 3 (claude-opus-4.6-1m) | 1,868,148 | 5.9 GB | 82,339 | 406 MB (7 files) | 45 MB | 251 MB | 75 s | 16 s |
-| rank 4 (gpt-5.5-GLihDpe) | 699,040 | 4.7 GB | 15,937 | 347 MB (6 files) | 15 MB | 269 MB | 55 s | 13 s |
-| round-0037 of rank 1 alone | 105,940 | 450 MB | 7,257 | 17 MB | 1.6 MB | — | 3.1 s | — |
+| Task A (the reference run) | 2,140,904 | 12.0 GB | 23,685 | 454 MB (8 files) | 27 MB | 359 MB | 118 s | 21 s |
+| Task C | 1,868,148 | 5.9 GB | 82,339 | 406 MB (7 files) | 45 MB | 251 MB | 75 s | 16 s |
+| Task D | 699,040 | 4.7 GB | 15,937 | 347 MB (6 files) | 15 MB | 269 MB | 55 s | 13 s |
+| round-0037 of Task A alone | 105,940 | 450 MB | 7,257 | 17 MB | 1.6 MB | — | 3.1 s | — |
 
 Round trip of `round-0037`: extract of 105,940 entries in 10 s, byte-identical to the source for every kept path
-(the 1,510 paths the old `archfilter.py` kept and `onesw-archive` drops are `*.bin` benchmark binaries).
+(the 1,510 paths the runner's old Python archive filter kept and its TOML rules drop are `*.bin` benchmark binaries).
 
-Verb latency on the rank 1 store (2.14 M rows, warm cache, whole process):
+Verb latency on the reference store (Task A; 2.14 M rows, warm cache, whole process):
 
 | verb | time | RSS |
 |---|---|---|
@@ -620,7 +628,7 @@ Against §8: pack time (118 s ≤ 120 s), store size (≈ 480 MB without derived
 `ls`/`stat`/`cat` all meet the targets. `find` over the full catalog is 0.4–1.4 s instead of ≤ 50 ms: the Rust
 scan materialises rows; routing full-catalog verbs through DuckDB (already bundled) would get the 10 ms of the
 prototype and is the first optimisation to do (M3.1). Derived `events` tables are large (250–360 MB per lane,
-3.9 M rows for rank 1) because `payload_json` is stored verbatim; they are rebuildable, so they can be left out of git
+3.9 M rows for the reference run) because `payload_json` is stored verbatim; they are rebuildable, so they can be left out of git
 with `pack --no-derive` and built on the reading side with `traj derive`.
 
 Deviations from the plan text above, all deliberate:
@@ -628,35 +636,37 @@ Deviations from the plan text above, all deliberate:
 - `watch` polls (default 60 s) instead of using inotify; the adapter's `batch_ready` is the readiness signal either way.
 - `dirs.n_files` and `dirs.bytes` are recursive; `n_dirs` is direct children.
 - A directory excluded by `exclude_dirs` is recorded once as a directory row in `excluded` (its subtree is not walked).
-- The onesw `rules.toml` excludes `*.bin` everywhere (the Python filter only excluded it under `logs/`).
-- 2026-09-04, later: the compiled `onesw` adapter and the `onesw-archive` built-in were removed after review; the
-  same behaviour now comes from `farm/onesw/trajfs/adapter.toml` (attrs, trajectories, readiness, hook patterns) and
-  `rules.toml`, loaded at run time. Hook patterns are no longer hard-coded: they come from `trajfs.toml [hook]`.
+- The runner's `rules.toml` excludes `*.bin` everywhere (its old Python filter only excluded it under `logs/`).
+- 2026-09-04, later: the compiled runner-specific adapter and its built-in rule profile were removed after review; the
+  same behaviour now comes from the runner repository's `trajfs/adapter.toml` (attrs, trajectories, readiness, hook
+  patterns) and `rules.toml`, loaded at run time. Hook patterns are no longer hard-coded: they come from `trajfs.toml [hook]`.
 
-Not yet done: onesw-gen `output_root` guard (§6.1 step 1, lives in the onesw repo); `traj bench`; `traj compact`;
-DuckDB-backed full-catalog verbs (M3.1); property-based T2 with `proptest` (the current T2 uses a fixed tree);
-T7 as an automated test (numbers above were taken by hand); T9 push/clone timing against the raw-tree commits.
+Not yet done: the runner's `output_root` guard (§6.1 step 1, lives in the runner's repo); `traj bench`; `traj compact`;
+DuckDB-backed full-catalog verbs (M3.1); property-based round trip with `proptest` (the current round-trip test uses a
+fixed tree); the whole run as an automated test (numbers above were taken by hand); git push/clone timing against the
+raw-tree commits.
 
 ## 15. Test-plan status — 2026-09-04 (second pass)
 
 After review the §11 plan was implemented in full rather than sampled. `cargo test --release`: 19 tests
-(core 4, adapters 1, CLI 14) in about 8 s; `--features slow`: T6 and T7 against the rank 1 run.
+(core 4, adapters 1, CLI 14) in about 8 s; the `#[ignore]`d reference-dataset tests run the reference round and the
+whole run against the reference run. Tests live under `crates/traj/tests/`, named by the item they verify.
 
-| §11 item | test(s) | notes |
-|---|---|---|
-| T1 pack format | `pack::tests::{roundtrip_small_and_large, t1_pack_seals_at_64mib_and_large_blobs_split_into_parts}` | 100 MiB noise blob across two packs; a frame cut by offset decodes with the `zstd` CLI |
-| T2 property round trip | `t2_property::pack_then_extract_is_byte_identical` (proptest, 24 cases) + `t2_round_trip_is_byte_identical` | random trees: unicode/space/dot names, symlinks, empty files, exec bits, 30 % shared content, multi-MB files; plain and `--hardlink-dedupe --mtime` |
-| T3 integrity | `t3_integrity_detects_corruption` | bit flip (deep), truncated pack, missing index segment, missing pack, missing manifest |
-| T4 catalog semantics | `t4_catalog_verbs_match_the_tree` | `ls`/`find` equal to `ls -A`/`find` on the extracted tree; `du` against `du -sb`; attrs filters; `tree` |
-| T5 grep/sql/events | `t5_grep_cat_sql_events`, `t5b_grep_matches_grep_rl_for_random_patterns` (20 patterns vs `grep -rlE`), `t5c_other_formats_and_rederive` | Claude Code and heterogeneous-JSONL fixtures; re-derive with a bumped adapter version leaves packs and catalog byte-identical |
-| T6 reference round | `slow::t6_reference_round` | counts recorded/asserted; deep verify; byte-identical extract; `cat` p50 ≤ 5 ms; `ls` < 0.5 s |
-| T7 whole run | `slow::t7_whole_run` | counts recorded/asserted; pack ≤ 120 s per 2 M paths; store ≤ 5 % of kept bytes and ≤ 100 files; verb latency bounds; one round extracted byte-identical; DuckDB CLI reads the catalog when installed |
-| T8 incremental | `t8_incremental_batches_add_only_new_content`, `t8b_sigkill_mid_pack_leaves_a_readable_store` (real SIGKILL), `t8c_watch_packs_when_the_adapter_reports_a_batch_ready` | |
-| T9 git | `t9b_separation_and_hook` | hook refusal, migration commit allowed, `traj commit`, clone verifies, push of store vs raw tree against a local bare remote (path counts compared, times printed) |
-| T9b/T9c separation, scaffold | `t9b_…`, `t9c_init_scaffolds_an_adapter_for_the_target_repo` | |
-| T11 skill | `t11_skill_mentions_every_verb_and_carries_the_version` | every worked example in the skill is executed against a fixture store |
-| T10 mount | `t10::t10_…` … `t10::t10j_…`, `t10::t10k_reference_store` (slow, `TRAJ_SLOW_STORE`) | the FUSE projection (`PLAN-fuse.md` §12, §16); skipped with a message without `/dev/fuse` |
-| criterion / bench | `crates/traj/benches/verbs.rs`, `traj bench` | |
+| §11 item | what the tests check |
+|---|---|
+| pack format | unit tests in the core crate: round trip of small and large blobs; packs seal at the size cap and large blobs split into parts; a 100 MiB noise blob across two packs; a frame cut by offset decodes with the `zstd` CLI |
+| round trip (property-based) | proptest (24 cases) plus a fixed tree: unicode/space/dot names, symlinks, empty files, exec bits, 30 % shared content, multi-MB files; plain and `--hardlink-dedupe --mtime` extracts are byte-identical |
+| integrity | bit flip (deep verify), truncated pack, missing index segment, missing pack, missing manifest are each detected and named |
+| catalog semantics | `ls`/`find` equal to `ls -A`/`find` on the extracted tree; `du` against `du -sb`; attrs filters; `tree` |
+| grep/sql/derived tables | `grep`, `cat`, `sql` and `events` on the fixture; 20 random patterns against `grep -rlE`; Claude Code and heterogeneous-JSONL fixtures; re-derive with a bumped adapter version leaves packs and catalog byte-identical |
+| reference round (`#[ignore]`) | counts recorded/asserted; deep verify; byte-identical extract; `cat` p50 ≤ 5 ms; `ls` < 0.5 s |
+| whole run (`#[ignore]`) | counts recorded/asserted; pack ≤ 120 s per 2 M paths; store ≤ 5 % of kept bytes and ≤ 100 files; verb latency bounds; one round extracted byte-identical; DuckDB CLI reads the catalog when installed |
+| incremental batches | a second batch adds only new content; a real SIGKILL mid-pack leaves a readable store; `watch` packs when the adapter reports a batch ready and discovers nested runs |
+| git, separation and hook | hook refusal, migration commit allowed, `traj commit`, clone verifies, push of store vs raw tree against a local bare remote (path counts compared, times printed); `init` scaffolds an adapter for the target repo; `init --mount-root` writes the VS Code watcher exclude |
+| skill | the skill names every verb and carries the version; every worked example in the skill is executed against a fixture store |
+| mount | the FUSE projection (`PLAN-fuse.md` §12, §16), including the `#[ignore]`d reference-store test; skipped with a message without `/dev/fuse` |
+| delete | one path removed from every batch, survivors byte-identical, Git as the checkpoint (`PLAN-deletion.md`) |
+| criterion / bench | `crates/traj/benches/verbs.rs`; `traj bench` reports the verbs and the mount |
 
 Defects the full plan caught that the sampled tests had not:
 - `extract --hardlink-dedupe` linked files with identical content but different exec bits (hard links share the mode);

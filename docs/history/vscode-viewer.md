@@ -1,10 +1,10 @@
 # Viewing a store as ordinary files in VS Code — plan
 
-Status: draft 1, 2026-09-04. Companion to `PLAN.md` (§1 goal 3, §5, §9) and `idea-review.md` §4 (the "V2: FUSE as
-a projection" clause). Numbers quoted are the §14/§15 measurements on the rank 1 store (2.14 M paths, 12.0 GB).
+Status: draft 1, 2026-09-04. Companion to `../PLAN.md` (§1 goal 3, §5, §9) and `idea-review.md` §4 (the "V2: FUSE as
+a projection" clause). Numbers quoted are the `../PLAN.md` §14/§15 measurements on the reference store (2.14 M paths, 12.0 GB).
 
 **Decision (2026-09-04):** the owner chose the FUSE mount, because it serves VS Code and every other viewer at
-once. The implementation plan is `PLAN-fuse.md`; this file stays as the record of the comparison. The extension is not pursued (removed
+once. The implementation plan is `../PLAN-fuse.md`; this file stays as the record of the comparison. The extension is not pursued (removed
 2026-09-04).
 
 > Q: Is that possible that we make the results of packed directory to be visible like normal directorys and files
@@ -55,7 +55,7 @@ surfaces as a read error, not as silently wrong bytes in an editor.
 
 (A) first because it answers the question completely for the environment actually in use (VS Code Remote-SSH on a
 Linux host with FUSE), it is in the project's one language, and it is exactly the "projection over the same backend"
-that `idea-review.md` §4 reserved for the moment extract-to-view became a daily friction. `PLAN.md` §1 lists "a
+that `idea-review.md` §4 reserved for the moment extract-to-view became a daily friction. `../PLAN.md` §1 lists "a
 mounted filesystem" as a non-goal; that referred to FUSE as the storage design, which stays dead. A mount that is a
 disposable cache over the store keeps every property of §1 (git sees packs and Parquet, nothing else).
 
@@ -66,7 +66,7 @@ disposable cache over the store keeps every property of §1 (git sees packs and 
 | S0 | (nothing to build) document `extract` + `code -r` in the skill; add `--open` is *not* worth it | – |
 | S1 | `traj mount`, `traj umount`, `doctor` awareness, T10 tests, docs | a round of the reference run opens in the VS Code Explorer over Remote-SSH; `diff -r` mount vs source is clean; §4.8 latencies met |
 
-S1 is one to two days (done the same day; `PLAN-fuse.md` §16).
+S1 is one to two days (done the same day; `../PLAN-fuse.md` §16).
 
 ## 4. Design: `traj mount`
 
@@ -195,7 +195,7 @@ present and keeps its extract path otherwise.
   handles keep reading.
 - Unmount with a file open: `umount` reports busy, `--lazy` succeeds, no zombie process.
 - Refusals: mountpoint inside a git work tree, inside `data_root`, inside `store_root`.
-- Slow (`--features slow`): mount the rank 1 store; `ls` of a round directory ≤ 50 ms; `cat` p50 ≤ 5 ms; `ls -R` of
+- Slow (`--features slow`): mount the reference store; `ls` of a round directory ≤ 50 ms; `cat` p50 ≤ 5 ms; `ls -R` of
   round-0037 ≤ 3× the extracted tree; RSS bound from §4.8.
 
 **T12 serve** (stage 2): every `serve` operation against the fixture store equals the CLI verb; a malformed line
@@ -203,7 +203,7 @@ gets an error reply and the process stays up; `read` of a 5 MB file round-trips.
 
 ## 6. Changes to the other documents when S1 lands
 
-- `PLAN.md` §1: non-goal reworded to "FUSE as the *storage* format"; §5 verb table gains `mount`/`umount`; §9 gets this
+- `../PLAN.md` §1: non-goal reworded to "FUSE as the *storage* format"; §5 verb table gains `mount`/`umount`; §9 gets this
   design (the section number was reserved for it); §10 milestone M6 "mount"; §11 T10 as above.
 - `README.md`: a "Browsing in VS Code" paragraph after Quick start with the two-line mount recipe and the watcher
   setting.

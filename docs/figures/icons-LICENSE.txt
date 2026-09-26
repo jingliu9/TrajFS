@@ -1,4 +1,4 @@
-Icon credits for task1-r1.tex, task1-r1.pdf, and task1-r1.png
+Icon credits for interfaces.tex and interfaces.png
 
 The robot, document, and people icons are redrawn adaptations of Lucide
 icons and the supplied visual reference. They are rendered as TikZ vector

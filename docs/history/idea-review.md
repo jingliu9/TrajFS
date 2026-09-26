@@ -6,10 +6,10 @@ Reviews are appended in order; earlier reviews are never edited.
 
 ## Review 1 — 2026-09-04 — DuckDB + Parquet + `traj` CLI  vs  tar + FUSE
 
-Reviewer: Claude (session d57052fe), measured on the fourth-grid archive that was being committed to git at the time
-(run `onesw-gen-outputs/suite-traj-log-summary-replicas/claude-opus-4.8-678xazw/onesw-generation-20260902T033145Z`,
-host fwf2-n0, 32 cores, page cache warm). Scripts and raw numbers: `review-bench/bench.py`, `review-bench/fullrun.py`,
-`review-bench/bench.json`, `review-bench/fullrun.json`.
+Reviewer: Claude, measured on the reference run's archive, which was being committed to git raw at the time (the
+measurement host, 32 cores, page cache warm). Raw numbers: `bench/prototype-one-round.json` and
+`bench/prototype-whole-run.json`; the scripts that produced them were exploratory one-offs and are not kept
+(`bench/README.md`).
 
 ### Verdict
 
@@ -40,7 +40,7 @@ One round directory (`rounds/round-0037`, the benchmark sample): 107,449 paths, 
 distinct** (14.5× by count within a single round: `builder/workspace` and `selected/` are byte-identical copies, and the
 per-call evidence files repeat).
 
-Size distribution of kept files (rank 4 run, 699 K files): p50 = 40 bytes, p90 = 1.9 KB, p99 = 80 KB; 79 % of files are
+Size distribution of kept files (the smallest sibling run, 699 K files): p50 = 40 bytes, p90 = 1.9 KB, p99 = 80 KB; 79 % of files are
 ≤ 1 KB and hold 1.8 % of the bytes; 100 % are ≤ 1 MB except the trajectories. Top names: `baseline-runtime.json` (29,613
 copies), `runtime.json`, `summary.json`, `independent-check.json`, `NN.stdout`/`.stderr` per measurement call.
 
@@ -49,7 +49,7 @@ Consequences:
 - Any format that is not content-addressed pays the 91× (tar per round, squashfs per round, parquet-with-content per
   round all store the same bytes 38 × 2 times across the run; only the within-round part is recovered by a compressor
   window or squashfs's own dedupe).
-- Git is already content-addressed: rank 3's 1.87 M paths became 82,351 blobs / 2.11 GB. Git's problem is purely the
+- Git is already content-addressed: a sibling run's 1.87 M paths became 82,351 blobs / 2.11 GB. Git's problem is purely the
   number of *paths* (tree entries + index entries), not the bytes. Inserting 2.17 M paths into the 11 M-entry index took
   > 3.5 h and was still not done (quadratic memmove); grafting the pre-built subtree into HEAD's tree with `mktree`
   took seconds. So with git the pain is tooling (index, `git status`, checkout, clone of 5 M paths), not storage.
@@ -113,7 +113,7 @@ Reading of the numbers:
 
 ### 3. Against the stated requirements
 
-Requirements from `docs/idea.md`: (a) fast commit/push/pull, (b) `ls` etc. still work, (c) open individual files in VS Code
+Requirements from `idea.md`: (a) fast commit/push/pull, (b) `ls` etc. still work, (c) open individual files in VS Code
 for review, (d) analysis, increasingly by agents.
 
 **tar + FUSE (chunked tars committed to git, mounted for reading)**
@@ -136,12 +136,12 @@ for review, (d) analysis, increasingly by agents.
 - (b) `traj ls`, `traj find`, `traj du` are millisecond queries. Muscle memory changes, capability does not.
 - (c) Weakest point. Humans get files via `traj cat` / `traj extract <subtree> /tmp/x`; extracting a full round (107 K
   files) is seconds. VS Code cannot open a Parquet blob; it opens the extracted tree. If human browsing is occasional,
-  as `docs/idea.md` states, this is acceptable. If it turns out to be daily, add FUSE over the same store (see hybrid).
+  as `idea.md` states, this is acceptable. If it turns out to be daily, add FUSE over the same store (see hybrid).
 - (d) Best of the options: `find`/`grep`/aggregates in ms–s, and, once `events.jsonl` is parsed into an `events` table,
-  the task23/task24-style sweeps (review verdicts per round, roofline ratios, tool-call failures across runs) become
+  the earlier analysis sweeps (review verdicts per round, roofline ratios, tool-call failures across runs) become
   single SQL statements instead of Python walkers. This is where the "AI agent consumer prefers SQL" argument is true;
   every analysis done on this grid so far was exactly such a sweep.
-- Corrections to the proposal in `docs/idea.md`: (1) do not put blob bytes in Parquet as the primary store (point-read cost
+- Corrections to the proposal in `idea.md`: (1) do not put blob bytes in Parquet as the primary store (point-read cost
   above); (2) the "stable envelope + `payload_json`" schema advice is right, and `events.jsonl` already is that envelope,
   so the events table is a derived layer that can be rebuilt when the schema changes; (3) DuckDB's own `.db` file should
   never be the persistent artifact, Parquet + packs are.
@@ -158,7 +158,7 @@ run.store/
 ```
 
 - `selected/` becomes a list of shas (a manifest row per path), not a copy: the 2× within-round duplication and the
-  38× across-round duplication vanish at write time, which is the same effect the hard-link + dedupe change in onesw-gen
+  38× across-round duplication vanish at write time, which is the same effect the hard-link + dedupe change in the rounds-style runner
   achieves on disk but at the archive layer.
 - `traj ls|find|du|cat|grep|extract|sql`: `ls`/`find`/`du`/`sql` hit `files.parquet` only; `cat`/`extract` resolve sha →
   pack offset and `pread` one frame (microseconds); `grep` runs over distinct blobs once and maps hits back to paths.

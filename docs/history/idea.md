@@ -1,3 +1,5 @@
+> Raw brainstorming transcript (September 2026) that preceded the TrajFS design; it opens mid-conversation and is kept unedited.
+> The reviewed conclusions are in `idea-review.md`; the live design documents are `../PLAN.md` and `../PLAN-fuse.md`.
 
 my issues is that the reposotiry contins too many small but duplicate files, what i want is
 that when committing to github, use tar with trunked size (friendly for commit speed, tunable, better to measure and design for gits)
@@ -1205,12 +1207,12 @@ logical object == POSIX file
 
 我觉得这个 framing 比“tar filesystem”准确很多。它其实是 **lakehouse-style storage + filesystem semantics**。
 
-[1]: https://docs.delta.io/optimizations-oss/?utm_source=chatgpt.com "Optimizations | Delta Lake"
-[2]: https://arrow.apache.org/docs/cpp/dataset.html?utm_source=chatgpt.com "Tabular Datasets — Apache Arrow v25.0.1"
-[3]: https://parquet.apache.org/docs/file-format/?utm_source=chatgpt.com "File Format | Parquet"
-[4]: https://parquet.apache.org/docs/concepts/?utm_source=chatgpt.com "Concepts | Parquet"
-[5]: https://parquet.apache.org/docs/file-format/configurations/?utm_source=chatgpt.com "Configurations | Parquet"
-[6]: https://parquet.apache.org/docs/file-format/pageindex/?utm_source=chatgpt.com "Page Index | Parquet"
+[1]: https://docs.delta.io/optimizations-oss/ "Optimizations | Delta Lake"
+[2]: https://arrow.apache.org/docs/cpp/dataset.html "Tabular Datasets — Apache Arrow v25.0.1"
+[3]: https://parquet.apache.org/docs/file-format/ "File Format | Parquet"
+[4]: https://parquet.apache.org/docs/concepts/ "Concepts | Parquet"
+[5]: https://parquet.apache.org/docs/file-format/configurations/ "Configurations | Parquet"
+[6]: https://parquet.apache.org/docs/file-format/pageindex/ "Page Index | Parquet"
 
 
 对，我觉得**很可能 OLAP-native 比 POSIX-native 更适合你的 trajectory 数据**，尤其是你现在给的前提：
@@ -1912,11 +1914,11 @@ selective extraction
 
 而且系统其实比自己造一个 fast FUSE filesystem 还要轻很多。
 
-[1]: https://duckdb.org/docs/current/guides/performance/file_formats?utm_source=chatgpt.com "File Formats – DuckDB"
-[2]: https://parquet.apache.org/docs/file-format/data-pages/compression/?utm_source=chatgpt.com "Compression | Parquet"
-[3]: https://duckdb.org/docs/current/data/parquet/overview?utm_source=chatgpt.com "Reading and Writing Parquet Files – DuckDB"
-[4]: https://duckdb.org/docs/current/sql/data_types/blob?utm_source=chatgpt.com "Blob Type – DuckDB"
-[5]: https://parquet.apache.org/docs/file-format/nestedencoding/?utm_source=chatgpt.com "Nested Encoding | Parquet"
+[1]: https://duckdb.org/docs/current/guides/performance/file_formats "File Formats – DuckDB"
+[2]: https://parquet.apache.org/docs/file-format/data-pages/compression/ "Compression | Parquet"
+[3]: https://duckdb.org/docs/current/data/parquet/overview "Reading and Writing Parquet Files – DuckDB"
+[4]: https://duckdb.org/docs/current/sql/data_types/blob "Blob Type – DuckDB"
+[5]: https://parquet.apache.org/docs/file-format/nestedencoding/ "Nested Encoding | Parquet"
 
 有关系，但**不会否定 OLAP-first**。真正的问题是：你的 output schema 会不会频繁演化到“每一版 agent 都长得不一样”。如果会，就不要把所有字段一开始都 rigidly 展开成固定 Parquet columns。
 

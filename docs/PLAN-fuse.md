@@ -1,9 +1,9 @@
 # trajfs — `traj mount`: a read-only FUSE projection of a store
 
-Status: draft 1, 2026-09-04, implemented the same day (§16 has the measurements and the deviations). Implements the decision recorded in `vscode-viewer.md`: a mount serves VS Code and
+Status: draft 1, 2026-09-04, implemented the same day (§16 has the measurements and the deviations). Implements the decision recorded in `history/vscode-viewer.md`: a mount serves VS Code and
 every other viewer (terminal tools, diff tools, other editors) at once, so it is built first and the VS Code
-extension idea of `vscode-viewer.md` is not pursued. Section numbers in `PLAN.md` that this plan touches are listed in
-§14. Numbers quoted are the `PLAN.md` §14/§15 measurements on the rank 1 store (2.14 M paths, 12.0 GB kept).
+extension idea of `history/vscode-viewer.md` is not pursued. Section numbers in `PLAN.md` that this plan touches are listed in
+§14. Numbers quoted are the `PLAN.md` §14/§15 measurements on the reference store (2.14 M paths, 12.0 GB kept).
 
 ## 1. Goal and non-goals
 
@@ -24,7 +24,7 @@ cannot).
 | feature gate | Cargo feature `mount`, default on, `#[cfg(all(feature = "mount", target_os = "linux"))]`; elsewhere the verb prints a one-line refusal naming `traj extract` | like `sql`; one binary |
 | threading | `fuser::Config::n_threads = 1` at first; handlers take `&self`, so state is behind `RwLock`/`Mutex` from day one and `--threads N` is a flag later | one `pread` + one frame decode per read; an editor never saturates that |
 | namespace source | directory listings from `Store::children`; lookups served from the parent's listing; no per-path `stat` on the hot path | `children` is one row-group-pruned scan; the listing already carries kind, mode, size, mtime, sha |
-| inode policy | allocated on first lookup, never reused in a session; entry = parent, name, kind, mode, size, mtime, sha (≈ 80 B + name); path rebuilt by walking parents | only visited paths cost memory; a full `ls -R` of the run is ≈ 200 MB, the `PLAN.v1.md` §9 bound |
+| inode policy | allocated on first lookup, never reused in a session; entry = parent, name, kind, mode, size, mtime, sha (≈ 80 B + name); path rebuilt by walking parents | only visited paths cost memory; a full `ls -R` of the run is ≈ 200 MB, the `history/PLAN.v1.md` §9 bound |
 | read granularity | whole blob per `open`, held in the file handle; sha verified once per open; blob LRU keyed by sha | p99 file 80 KB; 91 paths share a blob; verify stays in the loop as for `cat` |
 | freshness | reopen the `Store` when `MANIFEST.json` mtime changes (checked ≤ 1/s); listing cache dropped; kernel caches invalidated through `fuser::Notifier::inval_entry`/`inval_inode` for cached entries | batches are additive and a path may be re-recorded by a later batch, so path → sha can change; content per sha never does |
 | kernel TTLs | entry and attr TTL = `--ttl`, default 5 s; negative lookups not cached | bounded staleness with no notifier dependence; ENOENT for a path that a batch then adds resolves at once |
@@ -63,7 +63,7 @@ traj umount [<mountpoint>] [--lazy]
 
 - **Root.** ino 1. Single-store mode: root = store root (`children("")`). Multi-store mode: root children are the
   store ids; each store has its own inode subtable and `Store` handle.
-- **Directories** come from `dirs-*.parquet` through `children`, so empty directories exist (as in T4). Attributes:
+- **Directories** come from `dirs-*.parquet` through `children`, so empty directories exist (as in the catalog-semantics test). Attributes:
   mode `0555`, `nlink = 2 + n_dirs`, size 4096, mtime = newest mtime among direct children, or the batch `created`
   time from the manifest when the directory has none. uid/gid = the mounting user.
 - **Files**: mode `= recorded mode & 0555` (no write bit ever), size, mtime from the row, `blocks = ceil(size/512)`,
@@ -113,11 +113,11 @@ This replaces the `--max-inodes` idea; `--listing-cache` and `--blob-cache` stay
 As built: the check runs at most once a second from `lookup`, `readdir` and `open`; each trim logs the estimate and
 what it did; `TRAJ_MOUNT_DEBUG=1` also logs every invalidation and `forget`. An inode the kernel never looked up (a
 plain `readdir` entry) is dropped outright; a looked-up inode is nudged only when it was not served within the last
-`ttl + 1` s, so a walk in progress is not thrashed. Measured on the rank 1 store with `--memory 512M`: a walk of
+`ttl + 1` s, so a walk in progress is not thrashed. Measured on the reference store with `--memory 512M`: a walk of
 the whole run (3.14 M entries) ends at 805 MB RSS instead of 1.2 GB unbounded, with the estimate held at about
 530 MB; the gap is the ~300 B-per-inode estimate against a measured ~430 B plus allocator overhead, and inodes
 served within the window that the walk keeps alive. On the fixture, 25 inodes shrink to 2 once the kernel forgets.
-The default of 20 % of `MemTotal` is 26 GB on this 128 GB host, so it never trims here; laptops are the reason it
+The default of 20 % of `MemTotal` is 26 GB on the 128 GB measurement host, so it never trims here; laptops are the reason it
 is relative.
 
 ## 6. Reads
@@ -125,10 +125,10 @@ is relative.
 `open(ino)` resolves the inode's sha and kind, takes the blob from the cache or reads it through
 `Store::read_blob(reader, sha, verify = true)` (§10), and stores `Arc<Vec<u8>>` in a file-handle table.
 `read(fh, offset, size)` copies a slice. `release` drops the handle. A sha mismatch or a missing pack is `EIO` on
-`open`, logged once with the path; other files are unaffected (the T3 property of `cat`). `O_DIRECT`, `flock`,
+`open`, logged once with the path; other files are unaffected (the integrity property of `cat`). `O_DIRECT`, `flock`,
 `fallocate` are refused with `EINVAL`/`EROFS`.
 
-Multi-part blobs (> 64 MiB, split across packs, T1) are assembled by `PackReader::blob` as today and not cached.
+Multi-part blobs (> 64 MiB, split across packs, see the pack-format test) are assembled by `PackReader::blob` as today and not cached.
 
 ## 7. Freshness
 
@@ -140,7 +140,7 @@ Multi-part blobs (> 64 MiB, split across packs, T1) are assembled by `PackReader
 - The mount opens stores without the shared reader lock that other verbs take (`Store::open_unlocked`), so a
   daemon that runs for hours never blocks `traj pack`. Packs and Parquet segments already written are immutable
   (`PLAN.md` §2), and a batch is either fully present in the manifest or not, so a reopen during a `traj pack` sees either the old or the new batch, never a partial one
-  (the T8b SIGKILL property).
+  (the SIGKILL-mid-pack property of the incremental-batches tests).
 - Root of a multi-store mount: rescan `store_root` on `readdir`/`lookup` with a 5 s TTL; a removed store directory
   gives ENOENT and its inodes are dropped from the table.
 
@@ -206,7 +206,7 @@ allowed (stored `+x` files run), which is what a reviewer re-running a script ex
 
 Nothing in the store format, the catalog, the packs or `pack`/`verify` changes.
 
-## 11. Performance targets (warm, rank 1 store, foreground, `--threads 1`)
+## 11. Performance targets (warm, reference store, foreground, `--threads 1`)
 
 | operation | target | basis |
 |---|---|---|
@@ -214,13 +214,17 @@ Nothing in the store format, the catalog, the packs or `pack`/`verify` changes.
 | same, cached | ≤ 1 ms | listing cache |
 | `cat` of a 40 B file (open + read + release) | ≤ 5 ms | `cat` 1–2 ms in-process |
 | `cat` of a 5 MB log | ≤ 30 ms | 5 frames, one `pread` each |
-| `ls -R` of round-0037 (106 K paths) | ≤ 3× the extracted tree | `PLAN.v1.md` T10 |
+| `ls -R` of round-0037 (106 K paths) | ≤ 3× the extracted tree | the mount bound of `history/PLAN.v1.md` §11 |
 | `diff -r` round-0037 mount vs extract | ≤ 60 s | 106 K opens |
 | RSS after opening a round in VS Code | ≤ 150 MB | index + listings + blobs |
 | RSS after `ls -R` of the whole run | ≤ 400 MB | 2.14 M inode entries |
 | mount time | ≤ 200 ms | manifest + index load |
 
-## 12. Tests (T10, in `crates/traj/tests/cli.rs`)
+## 12. Tests (mount)
+
+The mount tests live under `crates/traj/tests/`, named by the item they verify; the reference-store test is marked
+`#[ignore]` and is enabled through `TRAJ_SLOW_SRC`, `TRAJ_SLOW_ADAPTER` and `TRAJ_SLOW_NAME` like the other
+reference-dataset tests (`PLAN.md` §11).
 
 Preconditions checked at the start of each test: `/dev/fuse` exists and `fusermount3` is on PATH; otherwise print
 `skipped: no FUSE` and return (CI containers usually lack `/dev/fuse`). A `Mounted` guard spawns
@@ -228,34 +232,36 @@ Preconditions checked at the start of each test: `/dev/fuse` exists and `fusermo
 timeout), and on `Drop` sends SIGTERM, waits, and runs `fusermount3 -u` if the mountpoint is still listed, so a
 panicking test never leaves a mount behind.
 
-| test | what |
+| behaviour verified | what |
 |---|---|
-| `t10_mount_is_byte_identical` | `packed("none")` fixture; `snapshot(mnt)` equals `snapshot(extract)`: bytes, modes (`& 0555`), symlink targets, empty file, exec bit, unicode name, the 2 MiB file |
-| `t10b_mount_matches_catalog_verbs` | `ls -A`, `find`, `du -sb` on the mount equal `traj ls`/`find`/`du` (the T4 oracle reversed); `stat` reports `nlink`, sizes, mtimes |
-| `t10c_read_only` | open for write, `mkdir`, `touch`, `rm`, `chmod` each fail with `EROFS`; `getfattr -n user.traj.sha256` equals the catalog sha when `getfattr` is installed |
-| `t10d_grep_equals_traj_grep` | `grep -rlE` on the mount for the T5b patterns equals `traj grep -l` |
-| `t10e_concurrent_readers` | 8 threads read random paths for 2 s; every read verifies; no `EIO` |
-| `t10f_new_batch_appears` | `traj pack` a second batch (T8 fixture change) into the mounted store; the new path lists within `--ttl 1`; a path re-recorded with new content shows the new bytes on a fresh open; a handle opened before the batch still returns the old bytes |
-| `t10g_corruption_is_eio` | flip a byte in a pack (T3): `cat` of an affected path returns `EIO`, an unaffected path reads fine |
-| `t10h_lifecycle` | SIGTERM unmounts cleanly; SIGKILL leaves a stale mount that `traj mount` clears before remounting; `umount` busy with an open file, `--lazy` succeeds; `--daemon` returns within 10 s with the mount live and a log file |
-| `t10i_refusals` | mountpoint inside a git work tree, inside `data_root`, inside `store_root`, non-empty directory, already mounted |
-| `t10j_multi_store_root` | two stores under `store_root`; root lists both ids; a third store added on disk appears within 5 s |
-| `slow::t10k_reference_run` | mount the rank 1 store; every row of §11 measured and asserted; `diff -r` of round-0037 clean |
+| byte-identical mount | `packed("none")` fixture; `snapshot(mnt)` equals `snapshot(extract)`: bytes, modes (`& 0555`), symlink targets, empty file, exec bit, unicode name, the 2 MiB file |
+| mount matches the catalog verbs | `ls -A`, `find`, `du -sb` on the mount equal `traj ls`/`find`/`du` (the catalog-semantics oracle reversed); `stat` reports `nlink`, sizes, mtimes |
+| read-only and xattrs | open for write, `mkdir`, `touch`, `rm`, `chmod` each fail with `EROFS`; `getfattr -n user.traj.sha256` equals the catalog sha when `getfattr` is installed |
+| grep on the mount equals `traj grep` | `grep -rlE` on the mount for the random-pattern grep test's patterns equals `traj grep -l` |
+| concurrent readers | 8 threads read random paths for 2 s; every read verifies; no `EIO` |
+| a new batch appears without remount | `traj pack` a second batch (the incremental-batches fixture change) into the mounted store; the new path lists within `--ttl 1`; a path re-recorded with new content shows the new bytes on a fresh open; a handle opened before the batch still returns the old bytes |
+| corruption is `EIO` for the affected file only | flip a byte in a pack (as in the integrity test): `cat` of an affected path returns `EIO`, an unaffected path reads fine |
+| lifecycle: stale, busy, lazy, daemon | SIGTERM unmounts cleanly; SIGKILL leaves a stale mount that `traj mount` clears before remounting; `umount` busy with an open file, `--lazy` succeeds; `--daemon` returns within 10 s with the mount live and a log file |
+| refusals | mountpoint inside a git work tree, inside `data_root`, inside `store_root`, non-empty directory, already mounted |
+| multi-store root | two stores under `store_root`; root lists both ids; a third store added on disk appears within 5 s |
+| memory budget | `--memory` trims listings and blobs and hands inodes back through `forget` while reads stay correct |
+| VS Code settings | every mount writes the machine-level watcher exclude and read-only settings; `--no-vscode` leaves them alone |
+| reference store (`#[ignore]`) | mount the store packed from the reference run; every row of §11 measured and asserted; `diff -r` of round-0037 clean |
 
-`t11` gains: the skill's mount example runs.
+The skill test gains: the skill's mount example runs.
 
 ## 13. Milestones
 
 | id | deliverable | exit criterion | estimate |
 |---|---|---|---|
-| M6a | single-store foreground mount: `lookup/getattr/readdir(+plus)/readlink/open/read/release/statfs`, listing and blob caches, `umount` | T10, T10b, T10c (minus xattrs), T10d, T10e, T10g green; round-0037 opens in VS Code over Remote-SSH | 1 day |
-| M6b | freshness (§7), multi-store root, xattrs, `--daemon`, stale-mount handling, `doctor`, refusals, `mount_root` | T10f, T10h, T10i, T10j green | 1 day |
-| M6c | docs (§14), the watcher exclude written by `traj init --mount-root`, T10k on rank 1, `traj bench` gains a mount row | §11 met and recorded in `PLAN.md` §14 | ½ day |
+| M6a | single-store foreground mount: `lookup/getattr/readdir(+plus)/readlink/open/read/release/statfs`, listing and blob caches, `umount` | byte-identical, catalog-verbs, read-only (minus xattrs), grep, concurrent-readers and corruption tests green; round-0037 opens in VS Code over Remote-SSH | 1 day |
+| M6b | freshness (§7), multi-store root, xattrs, `--daemon`, stale-mount handling, `doctor`, refusals, `mount_root` | new-batch, lifecycle, refusals and multi-store-root tests green | 1 day |
+| M6c | docs (§14), the watcher exclude written by `traj init --mount-root`, the reference-store test on the reference run, `traj bench` gains a mount row | §11 met and recorded in `PLAN.md` §14 | ½ day |
 
 ## 14. Documentation changes when M6a lands
 
 - `PLAN.md`: §1 non-goal reworded to "FUSE as the storage format"; §5 verb table gains `mount`/`umount`; §9 points
-  here; §10 milestone M6; §11 T10 as §12 above; §14 gets the measured rows.
+  here; §10 milestone M6; §11 mount tests as §12 above; §14 gets the measured rows.
 - `README.md`: a "Browsing in VS Code and other tools" section after Quick start with the three-line recipe:
 
   ```
@@ -266,13 +272,13 @@ panicking test never leaves a mount behind.
 
 - `skills/traj/SKILL.md`, "Materialise for a person": `traj mount` first, `extract` second; the rule "never write
   back into a store" gains "mounts are read-only; the kernel enforces it".
-- `vscode-viewer.md`: decision line at the top pointing here (done with this draft).
+- `history/vscode-viewer.md`: decision line at the top pointing here (done with this draft).
 
 ## 15. Risks, with the default chosen
 
 | risk | default |
 |---|---|
-| A directory with 100 K direct entries (some log directories) makes `lookup` of any child pay one big listing | accept; the listing is cached; measure on rank 1 and add a per-name `stat` fallback above 50 K entries only if needed |
+| A directory with 100 K direct entries (some log directories) makes `lookup` of any child pay one big listing | accept; the listing is cached; measure on the reference store and add a per-name `stat` fallback above 50 K entries only if needed |
 | Inode table growth on a full-run `ls -R` | the best-effort `--memory` budget of §5.1: blobs and listings evicted, inodes handed back through `forget` |
 | Kernel notifier calls fail on old kernels | ignore errors; the TTL bounds staleness anyway |
 | `fusermount3` missing on a future host | clear message naming the package (`fuse3`) and `traj extract` |
@@ -282,13 +288,13 @@ panicking test never leaves a mount behind.
 ## 16. Implementation status — 2026-09-04 (first build)
 
 Built the same day as this plan: `traj mount`, `traj umount`, the `mounts:` line of `traj doctor`, `mount_root` in
-`trajfs.toml` (`traj init --mount-root`), the skill text, and T10 as ten CLI tests plus the slow `t10k`.
-`cargo test --release`: 25 CLI tests green in about 8 s (the T10 ones skip themselves, with a message, where
+`trajfs.toml` (`traj init --mount-root`), the skill text, and the mount tests (ten CLI tests plus the `#[ignore]`d
+reference-store test). `cargo test --release`: 25 CLI tests green in about 8 s (the mount ones skip themselves, with a message, where
 `/dev/fuse` or `fusermount3` is missing). Code: `crates/traj/src/mount/{mod.rs, fs.rs}` (≈ 1,000 lines),
 `crates/traj/src/cmd/mount.rs` (≈ 400), `Store::read_blob` in the core (10). Dependencies added: `fuser` 0.18,
 `signal-hook`, `libc`; `predicates` and `libc` for the tests. The `mount` Cargo feature is on by default.
 
-Measured on this host against the rank 1 store (2.14 M paths, 17,039 directories and 105,940 files in
+Measured on the measurement host against the reference store (2.14 M paths, 17,039 directories and 105,940 files in
 `round-0037`), foreground, one FUSE thread, defaults:
 
 | operation | target (§11) | measured |
@@ -331,17 +337,17 @@ Deviations from the design text above, all deliberate:
   xattr needs it; names are `Box<str>`, shared with the lookup key.
 - **`allow_other`** is expressed through `fuser`'s session ACL (0.18 has no such mount option).
 - `traj extract .` now means the whole store, as the README always said (`.` normalised to the root).
-- T10 lives in `crates/traj/tests/cli.rs` as `t10::t10_…` through `t10::t10j_…` plus `t10::t10k_reference_store`
-  (`--features slow`, `TRAJ_SLOW_STORE=<store dir>`); the `Mounted` guard sends SIGTERM on drop and falls back to
+- The mount tests live under `crates/traj/tests/`, named by what they verify, with the reference-store test
+  `#[ignore]`d and enabled through the `TRAJ_SLOW_*` variables; the `Mounted` guard sends SIGTERM on drop and falls back to
   `fusermount3 -u -z`, so a failing test leaves no mount behind.
 
-Done later the same day: `traj init --mount-root` and `traj mount --save` write the watcher exclude (§9 item 2; test
-`t9d`); the farm repo was set up with `traj mount ~/traj-mnt --save --daemon` (22 stores); the `--memory` budget
-with `forget` (§5.1; tests `t10l` and the `Inodes::forget` unit test); `traj bench` measures the mount (`mount_s`,
-`mount_ls_cold_s`, `mount_ls_warm_s`, `mount_cat_s`; test `t12`), which also fixed `traj bench`'s `--store` flag
+Done later the same day: `traj init --mount-root` and `traj mount --save` write the watcher exclude (§9 item 2; the
+mount-root test); the experiment repository was set up with `traj mount ~/traj-mnt --save --daemon` (22 stores); the
+`--memory` budget with `forget` (§5.1; the memory-budget test and the `Inodes::forget` unit test); `traj bench`
+measures the mount (`mount_s`, `mount_ls_cold_s`, `mount_ls_warm_s`, `mount_cat_s`; the bench test), which also fixed `traj bench`'s `--store` flag
 clashing with the global `-S` (the verb panicked in clap before; it now takes `-S`).
 
-Later the same day: every mount writes VS Code's machine-level settings (§9; `--no-vscode`; test `t10m`), after
+Later the same day: every mount writes VS Code's machine-level settings (§9; `--no-vscode`; the VS Code-settings test), after
 the owner opened the mountpoint itself in VS Code. Lesson recorded: the first version of that write let the test
 suite's mounts touch the developer's real settings file and a write race dropped two unrelated keys (restored by
 hand); the tests now run with a throwaway `HOME`, the write is write-then-rename, and basename patterns are gone.

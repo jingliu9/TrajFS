@@ -55,7 +55,7 @@ traj edit    -S <store> <path>
 
 Rebuild derived tables after an adapter upgrade, check a commit for raw paths in CI, or record a performance baseline:
 ```
-traj derive -S <store>            traj hook check-tree HEAD            traj bench -S <store> --out review-bench/history/
+traj derive -S <store>            traj hook check-tree HEAD            traj bench -S <store> --out bench-results/
 ```
 
 Analyse with SQL (DuckDB; views: `files`, `dirs`, `blobs`, `excluded`, `events` and other `derived/*` tables; functions `blob(sha)`, `text(sha)`; several `-S` register a `store` column):

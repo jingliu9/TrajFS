@@ -14,7 +14,7 @@ Concretely, TrajFS bridges agent-generated files and Git-style management. Gener
 Analysis agents get compacted, queryable trajectories that Git can manage. Humans examine the files through commands
 and editors such as VS Code. The result: faster for Git, friendly to AI agents, and still files for humans.
 
-![TrajFS interfaces for generating agents, analysis agents, Git, and humans.](tasks/task1-r1.png)
+![TrajFS interfaces for generating agents, analysis agents, Git, and humans.](docs/figures/interfaces.png)
 
 Generating agents still write files. Analysis agents get compacted, queryable trajectories. Humans still inspect files with familiar tools.
 
@@ -29,7 +29,7 @@ iteration of agent work and review; `reviewer/review.json` is the reviewing agen
 
 Replace the example paths with yours; TrajFS does not require this layout. A store contains the source tree you pass
 to `pack`. Prefer keeping all agents and rounds of one task execution together.
-[More on store granularity.](tasks/granularity.md)
+[More on store granularity.](docs/granularity.md)
 
 ### Pack, find, and read a task
 
@@ -116,7 +116,7 @@ traj commit "$TRAJ_STORE"                # checkpoint the deletion
 The store must be committed and unchanged before `--yes`, and no `traj mount` may serve it (the command names the
 mountpoints to unmount). Later packs of the same source skip the deleted path. If an apply is interrupted,
 `traj delete --recover` discards the leftover sibling directory; the store itself is always either the old or the
-new verified version. [Protocol.](tasks/PLAN-deletion.md)
+new verified version. [Protocol.](docs/PLAN-deletion.md)
 
 ### Query events and compare tasks
 
@@ -296,13 +296,15 @@ compatibility, not a promise that every recursive operation is faster.
 <details>
 <summary>Earlier million-file prototype and raw benchmark records</summary>
 
-The [historical prototype result](review-bench/fullrun.json) records **2,173,703 regular files**, totaling
-**12,928,153,598 retained bytes**, stored in **472,254,625 bytes across 13 files**: about **27.4x smaller**.
+The [historical prototype result](docs/history/bench/prototype-whole-run.json) records **2,173,703 regular files**,
+totaling **12,928,153,598 retained bytes**, stored in **472,254,625 bytes across 13 files**: about **27.4x smaller**.
 It used content-addressed Parquet containing the blob bytes, not the current Rust zstd-pack format.
 
 Its retention rules and counted file types differ from the later Rust runs, so the two sets of results should not
-be mixed. The [one-round raw measurements](review-bench/bench.json), [prototype scripts](review-bench/), and
-[approach comparison](docs/idea-review.md) preserve the earlier tar/Parquet investigation and its limitations.
+be mixed. The [one-round raw measurements](docs/history/bench/prototype-one-round.json) and the
+[approach comparison](docs/history/idea-review.md) preserve the earlier tar/Parquet investigation and its limitations;
+[docs/history/bench/README.md](docs/history/bench/README.md) explains the JSON keys. The one-off scripts that produced
+those records are not part of this repository and the numbers cannot be reproduced from it.
 
 </details>
 
@@ -311,19 +313,19 @@ be mixed. The [one-round raw measurements](review-bench/bench.json), [prototype 
 Prepare a store with explicit retention and adapter settings, then record timings:
 
 ```bash
-mkdir -p review-bench/history
+mkdir -p bench-results
 traj -S stores/task-a.trajstore bench \
   --ls-dir rounds/round-0001 \
   --file rounds/round-0001/reviewer/review.json \
   --find-name review.json \
-  --out review-bench/history/
+  --out bench-results/
 ```
 
-`traj bench` writes timestamped JSON into an existing output directory. It is a convenience timing report, not a
-controlled comparison or correctness gate: confirm the individual commands succeed, compare repeated runs with
-the same rules and cache conditions, and use `traj verify --deep` separately.
-Its `verify_s` measures ordinary verification. On incremental stores, JSON path/blob counts describe the last batch,
-while `store_bytes` includes the whole store, including derived tables.
+`traj bench` runs each measurement several times (`--warmup` and `--runs` set how many) and writes timestamped JSON
+reporting the minimum and median of the repeated runs into an existing output directory; `traj bench --help`
+documents the JSON schema. It is a convenience timing report, not a controlled comparison or correctness gate: confirm
+the individual commands succeed, compare runs made with the same rules and cache conditions, and use
+`traj verify --deep` separately. `store_bytes` covers the whole store, including derived tables.
 
 ## Installation
 
@@ -403,7 +405,7 @@ limit and 60 MiB; large tables and content are split into physical segments.
 - **Append-oriented history, explicit deletion.** Removed source paths and newly excluded files are not purged
   from existing archives. `traj delete <path>` is the one deleting verb: it rebuilds the store without one file or
   subtree, deep-verifies the result, and swaps it in atomically; it requires the store to be committed first and no
-  mount to serve it. [Protocol and recovery.](tasks/PLAN-deletion.md)
+  mount to serve it. [Protocol and recovery.](docs/PLAN-deletion.md)
 - **Files, not full backup metadata.** Supported entries are regular files, empty files, and symlink targets under
   UTF-8 paths. Regular-file modes normalize to 0644/0755 according to executable bits. Empty directories, ownership,
   ACLs, original xattrs, and special files are not preserved; `extract --mtime` restores recorded file timestamps.
@@ -427,12 +429,16 @@ cargo bench --locked -p traj
 
 Coverage includes property-based round trips, corruption handling, consistent live-file prefixes, interrupted writes,
 incremental history, staged Git policy, SQL content access, adapters, and read-only mounts. FUSE integration cases
-skip when the host lacks FUSE; real-dataset cases are opt-in through the `slow` feature and environment variables
-documented in [the test plan](docs/PLAN.md).
+skip when the host lacks FUSE. Test files under `crates/traj/tests/` are named after the item they verify.
+Reference-dataset cases are marked `#[ignore]` and run with `cargo test -- --ignored` once `TRAJ_SLOW_SRC`,
+`TRAJ_SLOW_ADAPTER`, and `TRAJ_SLOW_NAME` point at a recorded run; a synthetic scaled-down counterpart runs by default.
+Randomized crash-consistency and property tests are part of the default run.
 
-Further reading: [design and test plan](docs/PLAN.md), [storage approach comparison](docs/idea-review.md),
-[store granularity](tasks/granularity.md), [FUSE design and measurements](docs/PLAN-fuse.md), and
-[why a mount instead of an editor extension](docs/vscode-viewer.md).
+Further reading: [design and test plan](docs/PLAN.md), [store granularity](docs/granularity.md),
+[deletion protocol](docs/PLAN-deletion.md), [FUSE design and measurements](docs/PLAN-fuse.md), and the superseded
+drafts and exploration notes under [docs/history/](docs/history/README.md), including the
+[storage approach comparison](docs/history/idea-review.md) and
+[why a mount instead of an editor extension](docs/history/vscode-viewer.md).
 
-Diagram files: [vector PDF](tasks/task1-r1.pdf), [LuaLaTeX source](tasks/task1-r1.tex),
-[icon credits](tasks/task1-r1-icons-LICENSE.txt), and [font license](tasks/fonts/barlow-semi-condensed/OFL.txt).
+Diagram files: [LuaLaTeX source](docs/figures/interfaces.tex), [icon credits](docs/figures/icons-LICENSE.txt), and
+[font license](docs/figures/fonts/barlow-semi-condensed/OFL.txt).
