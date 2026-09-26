@@ -16,3 +16,9 @@
 .idea/
 .vscode/
 *.swp
+
+# Python
+__pycache__/
+
+# Demo iteration artifacts
+/demo/*.small.*
