@@ -1,5 +1,5 @@
 //! `traj delete`: rebuild a store without one path, then swap it in atomically
-//! (tasks/PLAN-deletion.md §4). Nothing inside the store is modified in place:
+//! (docs/PLAN-deletion.md §4). Nothing inside the store is modified in place:
 //! the replacement is built in a sibling directory `<store>.deleting`, deep-verified,
 //! and exchanged with the store in one `renameat2(RENAME_EXCHANGE)` call.
 
@@ -205,6 +205,48 @@ fn derived_paths(root: &Path, batch: &Batch) -> Vec<(String, PathBuf)> {
 }
 
 /// Compute what deleting `path` removes. Read-only.
+///
+/// # Examples
+///
+/// The full protocol: plan, rebuild the candidate under the exclusive lock, swap it in.
+///
+/// ```
+/// use trajfs_core::delete::{apply, plan, rebuild};
+/// use trajfs_core::store::lock_store_exclusive;
+/// use trajfs_core::Store;
+/// # fn main() -> anyhow::Result<()> {
+/// # let tmp = tempfile::tempdir()?;
+/// # let src = tmp.path().join("run");
+/// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+/// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+/// # std::fs::write(src.join("README"), "hello\n")?;
+/// # let store_dir = tmp.path().join("run.trajstore");
+/// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+/// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+/// #     rules_name: "none".into(),
+/// #     adapter: &trajfs_core::NoAdapter,
+/// #     label: "round-0001".into(),
+/// #     jobs: 1,
+/// #     derive: false,
+/// #     store_id: None,
+/// # })?;
+/// let lock = lock_store_exclusive(&store_dir)?;
+/// let store = Store::open_unlocked(&store_dir)?;
+/// let plan = plan(&store, "rounds/round-0001")?;
+/// assert_eq!((plan.paths, plan.survivors, plan.blobs), (1, 1, 1));
+/// let work = rebuild(&store, &plan, trajfs_core::ARTIFACT_TARGET_BYTES)?;
+/// drop(store);
+/// apply(&store_dir, &work)?;
+/// drop(lock);
+///
+/// let after = Store::open(&store_dir)?;
+/// assert!(after.stat("rounds/round-0001/review.json")?.is_none());
+/// assert!(after.stat("README")?.is_some());
+/// assert_eq!(after.manifest.deleted[0].path, "rounds/round-0001");
+/// assert!(after.verify(true)?.ok());
+/// # Ok(())
+/// # }
+/// ```
 pub fn plan(store: &Store, path: &str) -> Result<Plan> {
     validate_target(store, path)?;
     let mut manifest = store.manifest.clone();

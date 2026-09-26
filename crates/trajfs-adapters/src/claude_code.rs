@@ -9,6 +9,24 @@ use trajfs_core::Adapter;
 
 pub struct ClaudeCode;
 
+/// Parse a Claude Code session file. `tool_result` blocks resolve their tool
+/// name through the `tool_use` id seen earlier in the same session.
+///
+/// # Examples
+///
+/// ```
+/// let events = trajfs_adapters::claude_code::parse(concat!(
+///     "{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2026-09-04T01:00:00Z\",",
+///     "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\"}]}}\n",
+///     "{\"type\":\"user\",\"uuid\":\"u1\",\"parentUuid\":\"a1\",",
+///     "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\"}]}}\n",
+/// ).as_bytes());
+/// assert_eq!(events[0].ts_us, Some(1_788_483_600_000_000));
+/// assert_eq!(events[0].tool_name.as_deref(), Some("Bash"));
+/// assert_eq!(events[1].parent_id.as_deref(), Some("a1"));
+/// assert_eq!(events[1].tool_name.as_deref(), Some("Bash"));
+/// assert_eq!(events[1].actor.as_deref(), Some("user"));
+/// ```
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
     let mut tool_names = HashMap::new();

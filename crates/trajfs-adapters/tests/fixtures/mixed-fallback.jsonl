@@ -1,0 +1,4 @@
+first line is not json
+{"event":"custom","ts":"2026-09-04T00:00:00Z","id":"x1","tool":"grep","returncode":0}
+{"kind":"other","parent_id":"x1","role":"user"}
+{"event":"trunc

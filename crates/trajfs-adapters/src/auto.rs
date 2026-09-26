@@ -2,6 +2,21 @@
 
 use trajfs_core::events::Event;
 
+/// Detect the format from the first recognisable record and parse the whole
+/// stream with that one parser; unknown streams fall back to generic JSONL.
+///
+/// # Examples
+///
+/// ```
+/// use trajfs_adapters::{auto, codex_cli, jsonl};
+/// let codex = b"garbage first\n{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n";
+/// assert_eq!(auto::parse(codex), codex_cli::parse(codex));
+/// assert_eq!(auto::parse(codex)[0].r#type, "_unparsed");
+///
+/// let unknown = b"{\"event\":\"custom\",\"tool\":\"grep\"}\n";
+/// assert_eq!(auto::parse(unknown), jsonl::parse(unknown));
+/// assert_eq!(auto::parse(unknown)[0].tool_name.as_deref(), Some("grep"));
+/// ```
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     // A partial/corrupt first record must not hide a later recognizable header.
     let mut format = None;

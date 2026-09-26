@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"thr_1","timestamp":"2026-09-04T00:00:00Z"}
+{"type":"turn.started","timestamp":"2026-09-04T00:00:00.100Z"}
+{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"plan"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"cargo build","exit_code":0,"aggregated_output":"ok"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"exit 7","exit_code":null}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"exit 7","exit_code":7}}
+{"type":"item.completed","item":{"id":"item_3","type":"mcp_tool_call","server":"fs","tool":"read_file","status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"file_change","changes":[{"path":"a.rs","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"done"}}
+{"type":"item.completed","item":{"id":"item_6","type":"web_search","query":"rust"}}
+{broken json
+{ "type": "turn.completed", "usage": {"input_tokens": 1e2, "output_tokens": 3.0} }
+{"type":"turn.failed","parent_id":"explicit","error":{"message":"synthetic"}}
+{"type":"item.started","item":{"id":"item_7","type":"command_execution","command":"tail

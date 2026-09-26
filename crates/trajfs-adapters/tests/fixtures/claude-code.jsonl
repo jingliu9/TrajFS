@@ -1,0 +1,11 @@
+{"type":"mode","mode":"normal","sessionId":"s1"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"list the files"},"uuid":"u1","timestamp":"2026-09-04T01:00:00.000Z","sessionId":"s1"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Listing."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"uuid":"a1","timestamp":"2026-09-04T01:00:01.000Z","sessionId":"s1"}
+{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]},"uuid":"u2","timestamp":"2026-09-04T01:00:02.000Z","sessionId":"s1"}
+{"type":"system","subtype":"info","content":"done","uuid":"s2","timestamp":"2026-09-04T01:00:03.000Z"}
+{"parentUuid":"u2","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading."},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.txt"}}]},"uuid":"a2","timestamp":"2026-09-04T01:00:04.000Z"}
+{"parentUuid":"a2","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"hello"},{"type":"tool_result","tool_use_id":"unknown","content":"?"}]},"uuid":"u3","timestamp":"2026-09-04T01:00:05.000Z"}
+{"type":"summary","summary":"listed files","leafUuid":"u3"}
+{"parentUuid":"u3","type":"assistant","message":{"role":"assistant","content":"plain string content"},"uuid":"a3","timestamp":1756947606}
+{"type":"user","uuid":"u4","message":{"role":"user","content":[{"type":"text","text":"unterminated"}]
+{"parentUuid":"a3","type":"user","message":{"role":"user","content":"bye"},"uuid":"u5","timesta

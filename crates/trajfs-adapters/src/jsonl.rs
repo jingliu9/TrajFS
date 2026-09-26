@@ -19,6 +19,24 @@ impl Jsonl {
     }
 }
 
+/// Parse generic JSON lines: envelope fields are found by common key names
+/// (`type`/`event`/`kind`, `id`/`uuid`, `parentId`/`parent_id`, `role`/`actor`,
+/// `tool_name`/`toolName`/`tool`, `exit_code`/`exitCode`/`returncode`).
+///
+/// # Examples
+///
+/// ```
+/// let events = trajfs_adapters::jsonl::parse(
+///     b"{\"event\":\"tool\",\"id\":\"e1\",\"tool\":\"grep\",\"returncode\":0}\n{oops",
+/// );
+/// assert_eq!(events.len(), 2);
+/// assert_eq!(events[0].r#type, "tool");
+/// assert_eq!(events[0].tool_name.as_deref(), Some("grep"));
+/// assert_eq!(events[0].exit_code, Some(0));
+/// // the malformed line is kept verbatim as an `_unparsed` event
+/// assert_eq!(events[1].r#type, "_unparsed");
+/// assert_eq!(events[1].payload_json, "\"{oops\"");
+/// ```
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
     lines(bytes, |seq, v, line| {

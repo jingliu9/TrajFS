@@ -1,0 +1,46 @@
+[
+  {
+    "seq": 0,
+    "ts_us": null,
+    "type": "_unparsed",
+    "id": null,
+    "parent_id": null,
+    "actor": null,
+    "tool_name": null,
+    "exit_code": null,
+    "payload_json": "\"first line is not json\""
+  },
+  {
+    "seq": 1,
+    "ts_us": 1788480000000000,
+    "type": "custom",
+    "id": "x1",
+    "parent_id": null,
+    "actor": null,
+    "tool_name": "grep",
+    "exit_code": 0,
+    "payload_json": "{\"event\":\"custom\",\"ts\":\"2026-09-04T00:00:00Z\",\"id\":\"x1\",\"tool\":\"grep\",\"returncode\":0}"
+  },
+  {
+    "seq": 2,
+    "ts_us": null,
+    "type": "other",
+    "id": null,
+    "parent_id": "x1",
+    "actor": "user",
+    "tool_name": null,
+    "exit_code": null,
+    "payload_json": "{\"kind\":\"other\",\"parent_id\":\"x1\",\"role\":\"user\"}"
+  },
+  {
+    "seq": 3,
+    "ts_us": null,
+    "type": "_unparsed",
+    "id": null,
+    "parent_id": null,
+    "actor": null,
+    "tool_name": null,
+    "exit_code": null,
+    "payload_json": "\"{\\\"event\\\":\\\"trunc\""
+  }
+]

@@ -24,6 +24,29 @@ pub const BUILTIN: &[&str] = &[
 
 /// Resolve an adapter: a built-in name, `jsonl:<globs>`, or a path to an adapter TOML file
 /// (relative paths are taken from `base` when given).
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> anyhow::Result<()> {
+/// let copilot = trajfs_adapters::resolve("copilot-cli", None)?;
+/// assert_eq!(copilot.name(), "copilot-cli");
+/// assert!(copilot.is_trajectory("rounds/round-0001/builder/events.jsonl"));
+/// assert!(!copilot.is_trajectory("rounds/round-0001/builder/stdout.log"));
+///
+/// let events = copilot.parse_events(
+///     "events.jsonl",
+///     b"{\"type\":\"tool.execution_complete\",\"data\":{\"toolName\":\"bash\",\"exitCode\":1}}\nnot json",
+/// );
+/// assert_eq!(events[0].tool_name.as_deref(), Some("bash"));
+/// assert_eq!(events[1].r#type, "_unparsed");
+///
+/// let custom = trajfs_adapters::resolve("jsonl:logs/*.jsonl", None)?;
+/// assert!(custom.is_trajectory("logs/run.jsonl"));
+/// assert!(trajfs_adapters::resolve("no-such-adapter", None).is_err());
+/// # Ok(())
+/// # }
+/// ```
 pub fn resolve(spec: &str, base: Option<&Path>) -> anyhow::Result<Box<dyn Adapter>> {
     if let Some(globs) = spec.strip_prefix("jsonl:") {
         return Ok(Box::new(jsonl::Jsonl::new(globs)?));

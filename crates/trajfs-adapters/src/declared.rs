@@ -66,6 +66,16 @@ pub struct HookSpec {
 
 pub type Parser = fn(&[u8]) -> Vec<Event>;
 
+/// The built-in parser for a `[trajectories].format` name.
+///
+/// # Examples
+///
+/// ```
+/// use trajfs_adapters::declared::parser_for;
+/// let parse = parser_for("jsonl").unwrap();
+/// assert_eq!(parse(b"{\"type\":\"x\"}")[0].r#type, "x");
+/// assert!(parser_for("yaml").is_err());
+/// ```
 pub fn parser_for(format: &str) -> Result<Parser> {
     Ok(match format {
         "copilot-cli" => crate::copilot_cli::parse,

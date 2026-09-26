@@ -1,0 +1,12 @@
+{"type":"session.start","timestamp":"2026-09-04T00:00:00Z","id":"1","data":{"sessionId":"s-1","version":"0.0.1"}}
+{"type":"user.message","timestamp":"2026-09-04T00:00:00.500Z","id":"2","parentId":"1","data":{"content":"run the tests"}}
+{"type":"assistant.message","timestamp":"2026-09-04T00:00:01Z","id":"3","parentId":"2","data":{"content":"Running.","toolRequests":[{"toolCallId":"c1","name":"bash"}]}}
+{"type":"tool.execution_start","timestamp":"2026-09-04T00:00:01Z","id":"4","parentId":"3","data":{"toolCallId":"c1","toolName":"bash","arguments":{"command":"cargo test"}}}
+{"type":"tool.execution_complete","timestamp":"2026-09-04T00:00:02Z","id":"5","parentId":"4","data":{"toolCallId":"c1","exitCode":1,"result":{"content":"1 failed"}}}
+not json at all
+{"type":"model.usage","timestamp":"2026-09-04T00:00:02.250Z","id":"6","ephemeral":true,"data": { "inputTokens": 1e3, "outputTokens": 42, "same": 1, "same": 2 }}
+{"type":"tool.execution_complete","timestamp":"2026-09-04T00:00:03Z","id":"7","parentId":"4","data":{"toolCallId":"c-unknown","exit_code":0}}
+{"type":"notice","timestamp":"2026-09-04T00:00:03.500Z","id":"8","message":"no data field"}
+{"type":"assistant.message","timestamp":"2026-09-04T00:00:04Z","id":"9","parentId":"5","data":{"content":"One test failed: \"quotes\" and } braces"}}
+{"type":"session.shutdown","timestamp":"2026-09-04T00:00:05Z","id":"10","data":{}}
+{"type":"session.info","timestamp":"2026-09-04T00:00:06Z","id":"11","data":{"partial":tr

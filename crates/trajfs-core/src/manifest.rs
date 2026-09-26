@@ -25,7 +25,7 @@ pub struct Manifest {
     pub deleted: Vec<Deletion>,
 }
 
-/// One applied deletion (tasks/PLAN-deletion.md §5).
+/// One applied deletion (docs/PLAN-deletion.md §5).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Deletion {
     /// Catalog path: one file or the root of a subtree.
@@ -270,6 +270,38 @@ impl Manifest {
         store.join("MANIFEST.json")
     }
 
+    /// Read and validate `MANIFEST.json` from a store directory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use trajfs_core::Manifest;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let tmp = tempfile::tempdir()?;
+    /// # let src = tmp.path().join("run");
+    /// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+    /// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+    /// # std::fs::write(src.join("README"), "hello\n")?;
+    /// # let store_dir = tmp.path().join("run.trajstore");
+    /// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+    /// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+    /// #     rules_name: "none".into(),
+    /// #     adapter: &trajfs_core::NoAdapter,
+    /// #     label: "round-0001".into(),
+    /// #     jobs: 1,
+    /// #     derive: false,
+    /// #     store_id: None,
+    /// # })?;
+    /// let manifest = Manifest::load(&store_dir)?;
+    /// assert_eq!(manifest.format, trajfs_core::FORMAT_VERSION);
+    /// assert_eq!(manifest.adapter.name, "none");
+    /// assert_eq!(manifest.batches.len(), 1);
+    /// assert_eq!(manifest.batches[0].paths, 2);
+    /// assert!(manifest.deleted.is_empty());
+    /// assert!(Manifest::load(tmp.path()).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn load(store: &Path) -> Result<Manifest> {
         let p = Self::path(store);
         let metadata = std::fs::symlink_metadata(&p)

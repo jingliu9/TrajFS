@@ -3,6 +3,25 @@
 use crate::util::{i32_of, lines, str_of, ts_us, unparsed};
 use trajfs_core::events::Event;
 
+/// Parse a native `codex exec --json` stream. Items carry their id, tool and
+/// exit code; every later record's parent is the thread started first.
+///
+/// # Examples
+///
+/// ```
+/// let events = trajfs_adapters::codex_cli::parse(concat!(
+///     "{\"type\":\"thread.started\",\"thread_id\":\"thr\"}\n",
+///     "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",",
+///     "\"type\":\"command_execution\",\"command\":\"false\",\"exit_code\":1}}\n",
+///     "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1e2}}",
+/// ).as_bytes());
+/// assert_eq!(events[0].id.as_deref(), Some("thr"));
+/// assert_eq!(events[1].parent_id.as_deref(), Some("thr"));
+/// assert_eq!(events[1].tool_name.as_deref(), Some("command_execution"));
+/// assert_eq!(events[1].exit_code, Some(1));
+/// // native spellings survive: the payload is the original line
+/// assert!(events[2].payload_json.contains("1e2"));
+/// ```
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
     let mut thread = None;

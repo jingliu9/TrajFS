@@ -1,0 +1,10 @@
+{"event":"start","ts":1756947600,"id":"e1"}
+{"kind":"tool","time":"2026-09-04T01:00:01Z","tool_name":"grep","returncode":0,"extra":{"a":1}}
+{"type":"end","timestamp":1756947602000,"parent_id":"e1","role":"assistant"}
+{"nothing":"recognisable"}
+garbage line
+{"event_type":"note","created_at":"2026-09-04T01:00:03Z","event_id":"e2","parent":"e1","author":"reviewer","tool":"cat","status_code":2}
+{"type":"blank-ts","timestamp":null,"exit_code":"not a number"}
+ 
+{"type": "spaced", "id": 42}
+{"type":"final","timestamp":1756947605,"id":"e9","tool_name":"ls","exit_co

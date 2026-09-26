@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn t1_pack_stays_below_target_and_large_blobs_split_into_parts() {
+    fn pack_stays_below_target_and_large_blobs_split_into_parts() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path(), 1).unwrap();
         // 100 MiB incompressible blob -> 100 parts, spanning two packs

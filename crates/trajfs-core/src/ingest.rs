@@ -137,6 +137,42 @@ fn remove_orphans(store: &Path, m: &Manifest) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+/// Pack `src` into `store` as one new batch (creating the store on first use).
+/// A later call with the same source appends only new or changed entries.
+///
+/// # Examples
+///
+/// ```
+/// use trajfs_core::ingest::{ingest, IngestOptions};
+/// use trajfs_core::rules::Rules;
+/// use trajfs_core::{NoAdapter, Store};
+/// # fn main() -> anyhow::Result<()> {
+/// let tmp = tempfile::tempdir()?;
+/// let src = tmp.path().join("run");
+/// std::fs::create_dir_all(src.join("logs"))?;
+/// std::fs::write(src.join("logs/a.log"), "first\n")?;
+/// let store_dir = tmp.path().join("run.trajstore");
+/// let options = || IngestOptions {
+///     rules: Rules::resolve("none").unwrap(),
+///     rules_name: "none".into(),
+///     adapter: &NoAdapter,
+///     label: String::new(),
+///     jobs: 1,
+///     derive: false,
+///     store_id: Some("example".into()),
+/// };
+/// let first = ingest(&src, &store_dir, options())?;
+/// assert_eq!((first.batch.id, first.batch.paths), (1, 1));
+///
+/// // unchanged files are skipped; a changed file becomes a row of the next batch
+/// std::fs::write(src.join("logs/b.log"), "second\n")?;
+/// let second = ingest(&src, &store_dir, options())?;
+/// assert_eq!((second.batch.id, second.batch.paths, second.skipped_unchanged), (2, 1, 1));
+/// let store = Store::open(&store_dir)?;
+/// assert_eq!(store.files_under("logs", false)?.len(), 2);
+/// # Ok(())
+/// # }
+/// ```
 pub fn ingest(src: &Path, store: &Path, opts: IngestOptions) -> Result<IngestSummary> {
     ingest_with_max_artifact_bytes(src, store, opts, ARTIFACT_TARGET_BYTES)
 }
@@ -425,7 +461,7 @@ pub fn ingest_with_max_artifact_bytes(
         }
     }
 
-    // 7. manifest: artifacts are durable before the manifest that declares them (tasks/PLAN-deletion.md §3)
+    // 7. manifest: artifacts are durable before the manifest that declares them (docs/PLAN-deletion.md §3)
     sync_dir(&store.join("catalog"))?;
     sync_dir(&packs_dir)?;
     if !derived.is_empty() {

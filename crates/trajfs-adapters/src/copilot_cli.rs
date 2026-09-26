@@ -39,6 +39,24 @@ fn raw_data(line: &str) -> &str {
     data.expect("parsed object has data")
 }
 
+/// Parse a Copilot CLI `events.jsonl`. The payload of each event is the raw
+/// `data` value, byte for byte; tool results inherit the name of their call.
+///
+/// # Examples
+///
+/// ```
+/// let events = trajfs_adapters::copilot_cli::parse(concat!(
+///     "{\"type\":\"tool.execution_start\",\"id\":\"2\",\"parentId\":\"1\",",
+///     "\"data\":{\"toolCallId\":\"c1\",\"toolName\":\"bash\"}}\n",
+///     "{\"type\":\"tool.execution_complete\",\"id\":\"3\",\"parentId\":\"2\",",
+///     "\"data\": {\"toolCallId\":\"c1\",\"exitCode\":1}}\n",
+/// ).as_bytes());
+/// assert_eq!(events[0].actor.as_deref(), Some("tool"));
+/// assert_eq!(events[1].tool_name.as_deref(), Some("bash"));
+/// assert_eq!(events[1].exit_code, Some(1));
+/// assert_eq!(events[1].parent_id.as_deref(), Some("2"));
+/// assert_eq!(events[1].payload_json, "{\"toolCallId\":\"c1\",\"exitCode\":1}");
+/// ```
 pub fn parse(bytes: &[u8]) -> Vec<Event> {
     let mut out = Vec::new();
     let mut tool_names: HashMap<String, String> = HashMap::new();

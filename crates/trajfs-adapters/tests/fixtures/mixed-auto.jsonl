@@ -1,0 +1,8 @@
+garbage before any header
+{"kind":"prelude","note":"no recognisable header yet"}
+{"type":"thread.started","thread_id":"thr_mixed"}
+{"type":"tool.execution_complete","timestamp":"2026-09-04T00:00:02Z","id":"5","data":{"toolCallId":"c1","toolName":"bash","exitCode":1}}
+{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","exit_code":3}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_mess

@@ -308,6 +308,36 @@ impl VerifyReport {
 }
 
 impl Store {
+    /// Open a store for reading, holding its shared reader lock until the
+    /// `Store` is dropped. Every artifact the manifest declares must exist.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use trajfs_core::Store;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let tmp = tempfile::tempdir()?;
+    /// # let src = tmp.path().join("run");
+    /// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+    /// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+    /// # std::fs::write(src.join("README"), "hello\n")?;
+    /// # let store_dir = tmp.path().join("run.trajstore");
+    /// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+    /// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+    /// #     rules_name: "none".into(),
+    /// #     adapter: &trajfs_core::NoAdapter,
+    /// #     label: "round-0001".into(),
+    /// #     jobs: 1,
+    /// #     derive: false,
+    /// #     store_id: None,
+    /// # })?;
+    /// let store = Store::open(&store_dir)?;
+    /// assert_eq!(store.manifest.batches.len(), 1);
+    /// assert_eq!(store.manifest.batches[0].label, "round-0001");
+    /// assert!(Store::open(tmp.path()).is_err(), "not a store");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn open(root: &Path) -> Result<Store> {
         Self::open_with_options(root, true, true)
     }
@@ -539,6 +569,42 @@ impl Store {
         Ok(())
     }
 
+    /// The visible catalog row at `path`, or `None` when no batch has it
+    /// (or a newer batch turned it, or an ancestor, into something else).
+    ///
+    /// # Examples
+    ///
+    /// Read a file by path: `stat` finds the row, `read_row` fetches and checks its bytes.
+    ///
+    /// ```
+    /// use trajfs_core::{Kind, Store};
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let tmp = tempfile::tempdir()?;
+    /// # let src = tmp.path().join("run");
+    /// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+    /// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+    /// # std::fs::write(src.join("README"), "hello\n")?;
+    /// # let store_dir = tmp.path().join("run.trajstore");
+    /// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+    /// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+    /// #     rules_name: "none".into(),
+    /// #     adapter: &trajfs_core::NoAdapter,
+    /// #     label: "round-0001".into(),
+    /// #     jobs: 1,
+    /// #     derive: false,
+    /// #     store_id: None,
+    /// # })?;
+    /// let store = Store::open(&store_dir)?;
+    /// let row = store.stat("rounds/round-0001/review.json")?.expect("packed");
+    /// assert_eq!(row.kind, Kind::File);
+    /// assert_eq!(row.size, 12);
+    /// let mut reader = store.reader();
+    /// let bytes = store.read_row(&mut reader, &row, true)?;
+    /// assert_eq!(bytes, b"{\"ok\":true}\n");
+    /// assert!(store.stat("rounds/missing")?.is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn stat(&self, path: &str) -> Result<Option<FileRow>> {
         catalog::validate_catalog_path(path, true)?;
         if path.is_empty() {
@@ -589,6 +655,40 @@ impl Store {
     }
 
     /// Direct children of `dir`: (subdirectories, files), with counts from the visible namespace.
+    ///
+    /// # Examples
+    ///
+    /// List the root (`""`) and one subdirectory.
+    ///
+    /// ```
+    /// use trajfs_core::Store;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let tmp = tempfile::tempdir()?;
+    /// # let src = tmp.path().join("run");
+    /// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+    /// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+    /// # std::fs::write(src.join("README"), "hello\n")?;
+    /// # let store_dir = tmp.path().join("run.trajstore");
+    /// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+    /// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+    /// #     rules_name: "none".into(),
+    /// #     adapter: &trajfs_core::NoAdapter,
+    /// #     label: "round-0001".into(),
+    /// #     jobs: 1,
+    /// #     derive: false,
+    /// #     store_id: None,
+    /// # })?;
+    /// let store = Store::open(&store_dir)?;
+    /// let (dirs, files) = store.children("")?;
+    /// assert_eq!(dirs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["rounds"]);
+    /// assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["README"]);
+    /// assert_eq!((dirs[0].n_files, dirs[0].n_dirs), (1, 1));
+    /// let (dirs, files) = store.children("rounds/round-0001")?;
+    /// assert!(dirs.is_empty());
+    /// assert_eq!(files[0].name(), "review.json");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn children(&self, dir: &str) -> Result<(Vec<DirEntry>, Vec<FileRow>)> {
         catalog::validate_catalog_path(dir, true)?;
         if self.manifest.batches.len() > 1 {
@@ -881,6 +981,35 @@ impl Store {
 
     /// Validate published catalogs and blob locations. `deep` also reads
     /// auxiliary Parquet pages and re-hashes every blob.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use trajfs_core::Store;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let tmp = tempfile::tempdir()?;
+    /// # let src = tmp.path().join("run");
+    /// # std::fs::create_dir_all(src.join("rounds/round-0001"))?;
+    /// # std::fs::write(src.join("rounds/round-0001/review.json"), "{\"ok\":true}\n")?;
+    /// # std::fs::write(src.join("README"), "hello\n")?;
+    /// # let store_dir = tmp.path().join("run.trajstore");
+    /// # trajfs_core::ingest::ingest(&src, &store_dir, trajfs_core::ingest::IngestOptions {
+    /// #     rules: trajfs_core::rules::Rules::resolve("none")?,
+    /// #     rules_name: "none".into(),
+    /// #     adapter: &trajfs_core::NoAdapter,
+    /// #     label: "round-0001".into(),
+    /// #     jobs: 1,
+    /// #     derive: false,
+    /// #     store_id: None,
+    /// # })?;
+    /// let store = Store::open(&store_dir)?;
+    /// let report = store.verify(true)?;
+    /// assert!(report.ok(), "{report:?}");
+    /// assert_eq!(report.files, 2);
+    /// assert_eq!(report.blobs, 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn verify(&self, deep: bool) -> Result<VerifyReport> {
         let mut rep = VerifyReport::default();
         for segment in &self.excluded_segments {

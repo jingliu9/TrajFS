@@ -94,7 +94,7 @@ impl EventsWriter {
             self.payload.append_value(&e.payload_json);
             self.ver.append_value(self.adapter_version);
             self.rows += 1;
-            if self.rows % crate::ROW_GROUP == 0 {
+            if self.rows.is_multiple_of(crate::ROW_GROUP) {
                 self.flush()?;
             }
         }
