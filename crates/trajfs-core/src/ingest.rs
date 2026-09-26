@@ -257,6 +257,15 @@ pub fn ingest_with_max_artifact_bytes(
     let batch_id = manifest.next_batch_id();
     let first_pack = manifest.next_pack_id();
 
+    // Phase timings on stderr when TRAJ_TIMING is set; a profiling aid, not part of the output.
+    let timing = std::env::var_os("TRAJ_TIMING").is_some();
+    let mut phase_t = Instant::now();
+    let mut phase = |name: &str| {
+        if timing {
+            eprintln!("timing: {name} {:.2} s", phase_t.elapsed().as_secs_f64());
+            phase_t = Instant::now();
+        }
+    };
     // 1. walk
     let skip = if store.starts_with(&src) {
         vec![store.clone()]
@@ -290,6 +299,7 @@ pub fn ingest_with_max_artifact_bytes(
     let mut skipped = 0u64;
     let todo: Vec<&Candidate> = w.kept.iter().collect();
 
+    phase("walk");
     // 3. hash
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.jobs.max(1))
@@ -383,16 +393,18 @@ pub fn ingest_with_max_artifact_bytes(
     // rows are in walk order (sorted by path) because par_iter preserves order in collect
     let bytes_total: u64 = rows.iter().map(|r| r.size as u64).sum();
 
+    phase("hash");
     // 4. pack new blobs
     let mut pw = PackWriter::with_max_bytes(&packs_dir, first_pack, max_artifact_bytes)?;
     let mut new: HashSet<Sha> = HashSet::new();
     let mut small = Vec::new();
     let mut large = Vec::new();
+    let mut unchanged = Vec::new();
     let mut new_blob_bytes = 0u64;
     for (r, &i) in rows.iter().zip(&ok_idx) {
         if r.kind == Kind::Empty || known_shas.contains(&r.sha) || !new.insert(r.sha) {
             if let Some(snapshot) = snapshots.get(&i) {
-                snapshot.verify()?;
+                unchanged.push(snapshot);
             }
             continue;
         }
@@ -404,6 +416,14 @@ pub fn ingest_with_max_artifact_bytes(
             Kind::Empty => {}
         }
     }
+    // Paths whose content is already stored still get the same guarantee as new ones: the source
+    // must be unchanged since it was hashed. In a checkpoint-heavy tree that is most of the files,
+    // so the re-read runs on the worker pool rather than serially on this thread.
+    pool.install(|| {
+        unchanged
+            .par_iter()
+            .try_for_each(|snapshot| snapshot.verify())
+    })?;
     for (sha, t) in &link_targets {
         if new.contains(sha) {
             pw.add_bytes(*sha, t)?;
@@ -415,6 +435,7 @@ pub fn ingest_with_max_artifact_bytes(
     }
     let (index_rows, packs, _bin, bout) = pw.finish()?;
 
+    phase("pack");
     // 5. catalog
     let dirs = catalog::dirs_from_files(rows.iter(), batch_id);
     let segments = catalog::write_batch_segments(
@@ -427,6 +448,7 @@ pub fn ingest_with_max_artifact_bytes(
         max_artifact_bytes,
     )?;
 
+    phase("catalog");
     // 6. derived tables
     let mut derived = Vec::new();
     if opts.derive {
@@ -461,6 +483,7 @@ pub fn ingest_with_max_artifact_bytes(
         }
     }
 
+    phase("derive");
     // 7. manifest: artifacts are durable before the manifest that declares them (docs/PLAN-deletion.md §3)
     sync_dir(&store.join("catalog"))?;
     sync_dir(&packs_dir)?;
@@ -486,6 +509,7 @@ pub fn ingest_with_max_artifact_bytes(
     manifest.batches.push(batch.clone());
     write_gitattributes(&store)?;
     manifest.save_with_limit(&store, max_artifact_bytes)?;
+    phase("manifest");
     Ok(IngestSummary {
         batch,
         skipped_unchanged: skipped,
