@@ -3,6 +3,14 @@ name = "trajfs-adapters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Trajectory format adapters (Copilot CLI, Codex CLI, Claude Code, JSONL, TOML layouts) for TrajFS stores"
 
 [dependencies]
 trajfs-core = { path = "../trajfs-core" }

@@ -3,12 +3,21 @@ name = "traj"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Command-line tool that packs AI-agent trajectory trees into compact, queryable, Git-friendly stores"
 
 [[bin]]
 name = "traj"
 path = "src/main.rs"
 
 [dependencies]
+tempfile.workspace = true
 trajfs-core = { path = "../trajfs-core" }
 trajfs-adapters = { path = "../trajfs-adapters" }
 anyhow.workspace = true
@@ -32,8 +41,6 @@ default = ["sql", "mount"]
 sql = ["dep:duckdb"]
 # read-only FUSE projection (`traj mount`, docs/PLAN-fuse.md); Linux only
 mount = ["dep:fuser", "dep:signal-hook", "dep:libc"]
-# real-dataset tests (T6, T7): need TRAJ_SLOW_SRC (a run directory) and TRAJ_SLOW_ADAPTER (its adapter TOML)
-slow = []
 
 [dev-dependencies]
 assert_cmd.workspace = true

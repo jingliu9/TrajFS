@@ -3,6 +3,14 @@ name = "trajfs-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Content-addressed store format for AI-agent trajectory files: zstd packs, Parquet catalog, batches"
 
 [dependencies]
 anyhow.workspace = true
