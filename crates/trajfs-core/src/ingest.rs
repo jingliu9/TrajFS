@@ -438,6 +438,7 @@ pub fn ingest_with_max_artifact_bytes(
     phase("pack");
     // 5. catalog
     let dirs = catalog::dirs_from_files(rows.iter(), batch_id);
+    phase("dirs");
     let segments = catalog::write_batch_segments(
         &store,
         batch_id,

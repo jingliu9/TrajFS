@@ -16,7 +16,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::AsBytes;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::statistics::Statistics;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -703,61 +703,80 @@ pub fn dirs_from_files<'a>(rows: impl Iterator<Item = &'a FileRow>, batch: u32) 
 
 pub(crate) struct DirAccumulator {
     batch: u32,
-    rows: BTreeMap<String, DirRow>,
-    seen_dirs: std::collections::HashSet<String>,
+    rows: Vec<DirRow>,
+    index: HashMap<String, usize>,
+    /// The previous row's directory and the row indices of that directory and every ancestor
+    /// (the directory itself first, the root last). Rows arrive sorted by path, so consecutive
+    /// files almost always share a directory and the chain is reused instead of re-walked.
+    last_dir: Option<String>,
+    last_chain: Vec<usize>,
 }
 
 impl DirAccumulator {
     pub(crate) fn new(batch: u32) -> Self {
         Self {
             batch,
-            rows: BTreeMap::new(),
-            seen_dirs: std::collections::HashSet::new(),
+            rows: Vec::new(),
+            index: HashMap::new(),
+            last_dir: None,
+            last_chain: Vec::new(),
         }
     }
 
+    /// The row index for `dir`, creating an empty row on first sight.
+    fn row_for(&mut self, dir: &str) -> (usize, bool) {
+        if let Some(&i) = self.index.get(dir) {
+            return (i, false);
+        }
+        let i = self.rows.len();
+        self.rows.push(DirRow {
+            dir: dir.to_string(),
+            depth: if dir.is_empty() {
+                0
+            } else {
+                dir.matches('/').count() as u16 + 1
+            },
+            batch: self.batch,
+            ..Default::default()
+        });
+        self.index.insert(dir.to_string(), i);
+        (i, true)
+    }
+
     pub(crate) fn push(&mut self, r: &FileRow) {
-        let dir = r.dir().to_string();
-        // count this file in its own dir and bytes in every ancestor
-        let mut cur = dir.clone();
-        loop {
-            let e = self.rows.entry(cur.clone()).or_insert_with(|| DirRow {
-                dir: cur.clone(),
-                depth: if cur.is_empty() {
-                    0
-                } else {
-                    cur.matches('/').count() as u16 + 1
-                },
-                batch: self.batch,
-                ..Default::default()
-            });
-            // n_files and bytes are recursive (everything below the directory); n_dirs is direct children
+        let dir = r.dir();
+        if self.last_dir.as_deref() != Some(dir) {
+            // walk up once per distinct directory: create rows, register each new directory as a
+            // direct child of its parent, and remember the chain of row indices
+            let mut chain = Vec::new();
+            let mut cur = dir;
+            let mut child_is_new = false;
+            loop {
+                let (i, created) = self.row_for(cur);
+                if child_is_new {
+                    // the directory below `cur` was seen for the first time: one more direct child
+                    self.rows[i].n_dirs += 1;
+                }
+                chain.push(i);
+                if cur.is_empty() {
+                    break;
+                }
+                child_is_new = created;
+                cur = crate::parent_of(cur);
+            }
+            self.last_dir = Some(dir.to_string());
+            self.last_chain = chain;
+        }
+        // n_files and bytes are recursive (everything below the directory); n_dirs is direct children
+        for &i in &self.last_chain {
+            let e = &mut self.rows[i];
             e.n_files += 1;
             e.bytes = e.bytes.saturating_add(r.size);
-            if cur.is_empty() {
-                break;
-            }
-            let parent = crate::parent_of(&cur).to_string();
-            // register cur as a subdir of parent once
-            if self.seen_dirs.insert(cur.clone()) {
-                let pe = self.rows.entry(parent.clone()).or_insert_with(|| DirRow {
-                    dir: parent.clone(),
-                    depth: if parent.is_empty() {
-                        0
-                    } else {
-                        parent.matches('/').count() as u16 + 1
-                    },
-                    batch: self.batch,
-                    ..Default::default()
-                });
-                pe.n_dirs += 1;
-            }
-            cur = parent;
         }
     }
 
     pub(crate) fn into_rows(self) -> BTreeMap<String, DirRow> {
-        self.rows
+        self.rows.into_iter().map(|r| (r.dir.clone(), r)).collect()
     }
 }
 

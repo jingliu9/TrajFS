@@ -57,6 +57,10 @@ pub fn walk(root: &Path, rules: &Rules, skip: &[PathBuf]) -> Result<WalkResult> 
 
 /// `walk`, additionally leaving out every entry at or below a `deleted` relative path
 /// (recorded once per pruned directory, or per file, with rule `deleted`), whatever the rules say.
+///
+/// Directories are visited in parallel on the global rayon pool: the walk of a million-file tree is
+/// bound by `stat` and directory reads, which scale with cores. Results are sorted by path, so the
+/// order of discovery does not matter.
 pub fn walk_with_deleted(
     root: &Path,
     rules: &Rules,
@@ -66,119 +70,188 @@ pub fn walk_with_deleted(
     let root = root
         .canonicalize()
         .with_context(|| format!("source {}", root.display()))?;
-    let mut kept = Vec::new();
-    let mut excluded = Vec::new();
-    let mut errors = Vec::new();
-    let mut it = walkdir::WalkDir::new(&root).follow_links(false).into_iter();
-    while let Some(entry) = it.next() {
+    let ctx = WalkCtx {
+        root: &root,
+        rules,
+        skip,
+        deleted,
+    };
+    let mut out = WalkResult {
+        kept: Vec::new(),
+        excluded: Vec::new(),
+        errors: Vec::new(),
+    };
+    walk_dir(&ctx, &root, &mut out);
+    out.kept
+        .sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
+    out.excluded
+        .sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
+    out.errors.sort();
+    Ok(out)
+}
+
+struct WalkCtx<'a> {
+    root: &'a Path,
+    rules: &'a Rules,
+    skip: &'a [PathBuf],
+    deleted: &'a [String],
+}
+
+impl WalkResult {
+    fn absorb(&mut self, other: WalkResult) {
+        self.kept.extend(other.kept);
+        self.excluded.extend(other.excluded);
+        self.errors.extend(other.errors);
+    }
+}
+
+/// One directory: classify its files here, then its subdirectories in parallel.
+fn walk_dir(ctx: &WalkCtx, dir: &Path, out: &mut WalkResult) {
+    use rayon::prelude::*;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(err) => {
+            out.errors
+                .push(format!("{}: {err}", rel_lossy(ctx.root, dir)));
+            return;
+        }
+    };
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
         let entry = match entry {
             Ok(e) => e,
             Err(err) => {
-                errors.push(err.to_string());
+                out.errors
+                    .push(format!("{}: {err}", rel_lossy(ctx.root, dir)));
                 continue;
             }
         };
-        if entry.depth() > 0 && entry.file_type().is_dir() {
-            if skip.iter().any(|s| s == entry.path()) {
-                it.skip_current_dir();
+        let path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(err) => {
+                out.errors
+                    .push(format!("{}: {err}", rel_lossy(ctx.root, &path)));
                 continue;
             }
-            let rel = entry.path().strip_prefix(&root).unwrap().to_string_lossy();
-            let rule = if deleted.iter().any(|d| is_under(&rel, d)) {
+        };
+        if ft.is_dir() {
+            if ctx.skip.iter().any(|s| s == &path) {
+                continue;
+            }
+            let rel = rel_lossy(ctx.root, &path);
+            let rule = if ctx.deleted.iter().any(|d| is_under(&rel, d)) {
                 Some(DELETED_RULE)
             } else {
-                rules.prune_directory(&rel)
+                ctx.rules.prune_directory(&rel)
             };
             if let Some(rule) = rule {
                 // the whole subtree is left out; recorded once as a directory row
-                let rel = entry
-                    .path()
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                excluded.push(Excluded {
+                out.excluded.push(Excluded {
                     rel,
                     size: 0,
                     rule: rule.into(),
                 });
-                it.skip_current_dir();
                 continue;
             }
-        }
-        if entry.depth() == 0 || entry.file_type().is_dir() {
+            subdirs.push(path);
             continue;
         }
-        let rel_os = entry.path().strip_prefix(&root).unwrap();
-        let rel = match rel_os.to_str() {
-            Some(s) => s.to_string(),
-            None => {
-                errors.push(format!("{}: path is not valid UTF-8", rel_os.display()));
-                continue;
-            }
-        };
-        let md = match entry.metadata() {
-            Ok(m) => m,
-            Err(err) => {
-                errors.push(format!("{rel}: {err}"));
-                continue;
-            }
-        };
-        let ft = entry.file_type();
-        let (kind, size, mode) = if ft.is_symlink() {
-            let target_len = std::fs::read_link(entry.path())
-                .map(|t| t.as_os_str().len())
-                .unwrap_or(0);
-            (Kind::Symlink, target_len as u64, 0o777u16)
-        } else if ft.is_file() {
-            let exec = md.permissions().mode() & 0o111 != 0;
-            (
-                if md.len() == 0 {
-                    Kind::Empty
-                } else {
-                    Kind::File
-                },
-                md.len(),
-                if exec { 0o755 } else { 0o644 },
-            )
-        } else {
-            excluded.push(Excluded {
-                rel,
-                size: 0,
-                rule: "special-file".into(),
-            });
-            continue;
-        };
-        let abs = entry.path().to_path_buf();
-        if deleted.iter().any(|d| is_under(&rel, d)) {
-            excluded.push(Excluded {
-                rel,
-                size,
-                rule: DELETED_RULE.into(),
-            });
-            continue;
-        }
-        match rules.decide(&rel, size, kind == Kind::Symlink, &|| is_elf(&abs)) {
-            Decision::Keep => kept.push(Candidate {
-                rel,
-                abs,
-                kind,
-                mode,
-                size,
-                mtime_ns: md.mtime() * 1_000_000_000 + md.mtime_nsec(),
-            }),
-            Decision::Exclude(rule) => excluded.push(Excluded {
-                rel,
-                size,
-                rule: rule.into(),
-            }),
-        }
+        classify(ctx, &path, ft, out);
     }
-    kept.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
-    excluded.sort_by(|a, b| a.rel.as_bytes().cmp(b.rel.as_bytes()));
-    Ok(WalkResult {
-        kept,
-        excluded,
-        errors,
-    })
+    if subdirs.is_empty() {
+        return;
+    }
+    let results: Vec<WalkResult> = subdirs
+        .par_iter()
+        .map(|d| {
+            let mut r = WalkResult {
+                kept: Vec::new(),
+                excluded: Vec::new(),
+                errors: Vec::new(),
+            };
+            walk_dir(ctx, d, &mut r);
+            r
+        })
+        .collect();
+    for r in results {
+        out.absorb(r);
+    }
+}
+
+fn rel_lossy(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A non-directory entry: keep, exclude, or record an error, exactly as the rules say.
+fn classify(ctx: &WalkCtx, path: &Path, ft: std::fs::FileType, out: &mut WalkResult) {
+    let rel_os = path.strip_prefix(ctx.root).unwrap_or(path);
+    let rel = match rel_os.to_str() {
+        Some(s) => s.to_string(),
+        None => {
+            out.errors
+                .push(format!("{}: path is not valid UTF-8", rel_os.display()));
+            return;
+        }
+    };
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(err) => {
+            out.errors.push(format!("{rel}: {err}"));
+            return;
+        }
+    };
+    let (kind, size, mode) = if ft.is_symlink() {
+        let target_len = std::fs::read_link(path)
+            .map(|t| t.as_os_str().len())
+            .unwrap_or(0);
+        (Kind::Symlink, target_len as u64, 0o777u16)
+    } else if ft.is_file() {
+        let exec = md.permissions().mode() & 0o111 != 0;
+        (
+            if md.len() == 0 {
+                Kind::Empty
+            } else {
+                Kind::File
+            },
+            md.len(),
+            if exec { 0o755 } else { 0o644 },
+        )
+    } else {
+        out.excluded.push(Excluded {
+            rel,
+            size: 0,
+            rule: "special-file".into(),
+        });
+        return;
+    };
+    if ctx.deleted.iter().any(|d| is_under(&rel, d)) {
+        out.excluded.push(Excluded {
+            rel,
+            size,
+            rule: DELETED_RULE.into(),
+        });
+        return;
+    }
+    match ctx
+        .rules
+        .decide(&rel, size, kind == Kind::Symlink, &|| is_elf(path))
+    {
+        Decision::Keep => out.kept.push(Candidate {
+            rel,
+            abs: path.to_path_buf(),
+            kind,
+            mode,
+            size,
+            mtime_ns: md.mtime() * 1_000_000_000 + md.mtime_nsec(),
+        }),
+        Decision::Exclude(rule) => out.excluded.push(Excluded {
+            rel,
+            size,
+            rule: rule.into(),
+        }),
+    }
 }

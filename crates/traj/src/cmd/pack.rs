@@ -21,8 +21,8 @@ pub struct PackArgs {
     /// Batch label
     #[arg(long, default_value = "")]
     pub label: String,
-    /// Hashing/compression workers
-    #[arg(long, default_value_t = 16)]
+    /// Hashing/compression workers (default: the number of CPUs)
+    #[arg(long, default_value_t = default_jobs())]
     pub jobs: usize,
     /// Do not build derived tables (events)
     #[arg(long)]
@@ -144,7 +144,7 @@ pub struct WatchArgs {
     /// Pack at most this many batches then exit (0 = forever)
     #[arg(long, default_value_t = 0)]
     pub max_batches: u32,
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = default_jobs())]
     pub jobs: usize,
     /// Keep raw trajectory blobs but defer derived tables (useful for Git stores).
     #[arg(long)]
@@ -261,6 +261,14 @@ fn run_args_for(
         strict: false,
         id: Some(id.to_string()),
     })
+}
+
+/// Worker count when `--jobs` is not given: one per CPU, since hashing, re-verification, and
+/// compression all scale with cores and the walk is the serial part.
+pub(crate) fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(16)
 }
 
 #[cfg(test)]
