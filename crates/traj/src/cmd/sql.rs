@@ -1,4 +1,6 @@
 //! `traj sql`: DuckDB over the store's Parquet files (docs/PLAN.md §5).
+// Without the `sql` feature only the stub `run` is compiled; the view builders stay for the docs and tests.
+#![cfg_attr(not(feature = "sql"), allow(dead_code))]
 
 use crate::config::{resolve_store, Config};
 use anyhow::{bail, Context, Result};
@@ -250,10 +252,9 @@ mod udf {
                 a.value(i).to_vec()
             } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
                 hex::decode(a.value(i)).ok()?
-            } else if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
-                hex::decode(a.value(i)).ok()?
             } else {
-                return None;
+                let a = col.as_any().downcast_ref::<LargeStringArray>()?;
+                hex::decode(a.value(i)).ok()?
             };
             bytes.as_slice().try_into().ok()
         };

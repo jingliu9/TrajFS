@@ -48,7 +48,7 @@ pub fn run(stores: &[String], a: GrepArgs) -> Result<i32> {
     let name_g = a
         .name
         .as_deref()
-        .map(|g| Glob::new(g))
+        .map(Glob::new)
         .transpose()?
         .map(|g| g.compile_matcher());
     let dir = norm(&a.path);

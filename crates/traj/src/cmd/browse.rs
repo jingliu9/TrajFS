@@ -203,13 +203,13 @@ pub fn find(stores: &[String], a: FindArgs) -> Result<i32> {
     let name_g = a
         .name
         .as_deref()
-        .map(|g| Glob::new(g))
+        .map(Glob::new)
         .transpose()?
         .map(|g| g.compile_matcher());
     let path_g = a
         .path
         .as_deref()
-        .map(|g| Glob::new(g))
+        .map(Glob::new)
         .transpose()?
         .map(|g| g.compile_matcher());
     let kind = match a.kind.as_deref() {

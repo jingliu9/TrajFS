@@ -76,7 +76,7 @@ fn write_to(dir: &std::path::Path, cfg: Option<&Config>) -> Result<()> {
             "{}{}{}",
             &existing[..s],
             section,
-            &existing[e + end.len()..].trim_start_matches('\n')
+            existing[e + end.len()..].trim_start_matches('\n')
         ),
         _ => {
             if existing.is_empty() {

@@ -67,6 +67,7 @@ pub fn write_vscode_exclude(repo: &Path, mount: &Path) -> Result<PathBuf> {
 
 /// The VS Code settings files on this machine that apply to every folder opened here: the Remote-SSH server's
 /// machine settings and, for a local VS Code, the user settings. Only files whose directory already exists.
+#[cfg(all(feature = "mount", target_os = "linux"))]
 pub fn vscode_machine_settings() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
@@ -261,6 +262,21 @@ fn owned_traj_mounts(text: &str, uid: u32) -> Vec<PathBuf> {
         })
         .map(|(mp, _, _)| mp)
         .collect()
+}
+
+/// Whether this process can serve a FUSE mount here: the `mount` feature is built in, `/dev/fuse` exists, and a
+/// `fusermount3` (or `fusermount`) helper is on `PATH`. Used by `traj bench` and by callers that want to skip
+/// mount work instead of failing.
+pub fn fuse_available() -> bool {
+    if !cfg!(all(feature = "mount", target_os = "linux")) || !Path::new("/dev/fuse").exists() {
+        return false;
+    }
+    std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .any(|d| d.join("fusermount3").is_file() || d.join("fusermount").is_file())
+        })
+        .unwrap_or(false)
 }
 
 pub fn is_mounted(mp: &Path) -> bool {

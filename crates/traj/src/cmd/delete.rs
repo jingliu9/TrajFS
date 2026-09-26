@@ -1,5 +1,5 @@
 //! `traj delete`: remove one path (a file or a subtree) from every batch of a store
-//! (tasks/PLAN-deletion.md). Dry run by default; `--yes` applies; `--recover` finishes
+//! (docs/PLAN-deletion.md). Dry run by default; `--yes` applies; `--recover` finishes
 //! or discards an interrupted apply.
 
 use crate::config::{artifact_target_bytes, git_toplevel, resolve_store, Config};

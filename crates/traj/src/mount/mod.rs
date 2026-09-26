@@ -414,9 +414,18 @@ impl StoreHandle {
     }
 
     pub fn blob(&self, sha: &Sha, verify: bool) -> Result<Vec<u8>> {
-        let st = self.store.read().unwrap();
-        let mut r = self.reader.lock().unwrap();
-        st.read_blob(&mut r, sha, verify)
+        let bytes = {
+            let st = self.store.read().unwrap();
+            let mut r = self.reader.lock().unwrap();
+            st.read_blob(&mut r, sha, false)?
+        };
+        // Verify after the pack reader is released: hashing needs nothing shared, and doing it under the
+        // lock serialised every concurrent uncached open on one SHA-256 at a time (a 2 MiB blob is ~0.4 s
+        // in a debug build), so `--threads N` gained nothing for readers that miss the blob cache.
+        if verify && trajfs_core::hash::sha_of_bytes(&bytes) != *sha {
+            bail!("blob {}: content does not match its sha", hex::encode(sha));
+        }
+        Ok(bytes)
     }
 }
 
@@ -644,8 +653,11 @@ pub struct TrajFs {
     last_trim: Mutex<Instant>,
     /// (parent ino, name, ino, also the data cache) whose kernel caches must be dropped; consumed by the notifier
     /// thread. With `false` only the entry goes, which is how the memory budget asks the kernel to forget.
-    inval: Mutex<Option<mpsc::Sender<(u64, String, u64, bool)>>>,
+    inval: Mutex<Option<mpsc::Sender<Invalidation>>>,
 }
+
+/// One kernel-cache invalidation request: `(parent ino, name, ino, also drop the data cache)`.
+pub type Invalidation = (u64, String, u64, bool);
 
 impl TrajFs {
     fn new(
@@ -721,7 +733,7 @@ impl TrajFs {
         Self::new(stores, true, store_root, opts, uid, gid)
     }
 
-    pub fn set_invalidator(&self, tx: mpsc::Sender<(u64, String, u64, bool)>) {
+    pub fn set_invalidator(&self, tx: mpsc::Sender<Invalidation>) {
         *self.inval.lock().unwrap() = Some(tx);
     }
 
@@ -819,10 +831,12 @@ impl TrajFs {
         let horizon = now.saturating_sub(self.opts.ttl.as_secs() + 1);
         let inodes = self.inodes.read().unwrap();
         for info in inodes.by_ino.values() {
-            if info.store == Some(i) && info.ino != 1 && !info.name.is_empty() {
-                if info.served.load(Ordering::Relaxed) >= horizon {
-                    let _ = tx.send((info.parent, info.name.to_string(), info.ino, true));
-                }
+            if info.store == Some(i)
+                && info.ino != 1
+                && !info.name.is_empty()
+                && info.served.load(Ordering::Relaxed) >= horizon
+            {
+                let _ = tx.send((info.parent, info.name.to_string(), info.ino, true));
             }
         }
         Ok(())
@@ -1016,6 +1030,32 @@ impl TrajFs {
     pub fn close_handle(&self, fh: u64) {
         self.handles.lock().unwrap().remove(&fh);
     }
+}
+
+/// `<store_root>/<id>.trajstore` → `id`; any other directory name is used as is.
+pub fn store_id_of(p: &Path) -> String {
+    let n = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    n.trim_end_matches(".trajstore").to_string()
+}
+
+/// `256M`, `1G`, `4096` → bytes.
+pub fn parse_size(s: &str) -> Result<usize> {
+    let s = s.trim();
+    let (num, mul) = match s.chars().last() {
+        Some('K') | Some('k') => (&s[..s.len() - 1], 1usize << 10),
+        Some('M') | Some('m') => (&s[..s.len() - 1], 1usize << 20),
+        Some('G') | Some('g') => (&s[..s.len() - 1], 1usize << 30),
+        _ => (s, 1usize),
+    };
+    let n: usize = num
+        .trim()
+        .parse()
+        .with_context(|| format!("{s}: not a size (use e.g. 256M)"))?;
+    n.checked_mul(mul)
+        .with_context(|| format!("{s}: size is too large"))
 }
 
 #[cfg(test)]
@@ -1288,30 +1328,4 @@ mod tests {
         assert!(t.forget(b1_ino, 1));
         assert_eq!(t.intern(1, "b", Some(0), [2u8; 32], None).ino, b2.ino);
     }
-}
-
-/// `<store_root>/<id>.trajstore` → `id`; any other directory name is used as is.
-pub fn store_id_of(p: &Path) -> String {
-    let n = p
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    n.trim_end_matches(".trajstore").to_string()
-}
-
-/// `256M`, `1G`, `4096` → bytes.
-pub fn parse_size(s: &str) -> Result<usize> {
-    let s = s.trim();
-    let (num, mul) = match s.chars().last() {
-        Some('K') | Some('k') => (&s[..s.len() - 1], 1usize << 10),
-        Some('M') | Some('m') => (&s[..s.len() - 1], 1usize << 20),
-        Some('G') | Some('g') => (&s[..s.len() - 1], 1usize << 30),
-        _ => (s, 1usize),
-    };
-    let n: usize = num
-        .trim()
-        .parse()
-        .with_context(|| format!("{s}: not a size (use e.g. 256M)"))?;
-    n.checked_mul(mul)
-        .with_context(|| format!("{s}: size is too large"))
 }
