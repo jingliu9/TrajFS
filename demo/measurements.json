@@ -1,0 +1,271 @@
+{
+  "created": "2026-09-26 11:36:44",
+  "host": "Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz, 40 cores",
+  "cpus": 40,
+  "root": "/workspace/trajfs-demo",
+  "tree": "/workspace/trajfs-demo/runs/task-a",
+  "requested_files": 1000000,
+  "rounds": 40,
+  "generate": {
+    "root": "/workspace/trajfs-demo/runs/task-a",
+    "files": 999580,
+    "rounds": 40,
+    "first_round": 1,
+    "workspace_files": 8190,
+    "logs_per_round": 819,
+    "seconds": 37.061355549958535
+  },
+  "file_count": 999580,
+  "find_seconds": 2.7484617399750277,
+  "tree_bytes": 5756321792,
+  "tree_apparent_bytes": 2697729062,
+  "du_sh": "5.4G",
+  "round_dirs": [
+    "round-0001",
+    "round-0002",
+    "round-0003",
+    "round-0004",
+    "round-0005",
+    "round-0006",
+    "round-0007",
+    "round-0008",
+    "round-0009",
+    "round-0010",
+    "round-0011",
+    "round-0012",
+    "round-0013",
+    "round-0014",
+    "round-0015",
+    "round-0016",
+    "round-0017",
+    "round-0018",
+    "round-0019",
+    "round-0020",
+    "round-0021",
+    "round-0022",
+    "round-0023",
+    "round-0024",
+    "round-0025",
+    "round-0026",
+    "round-0027",
+    "round-0028",
+    "round-0029",
+    "round-0030",
+    "round-0031",
+    "round-0032",
+    "round-0033",
+    "round-0034",
+    "round-0035",
+    "round-0036",
+    "round-0037",
+    "round-0038",
+    "round-0039",
+    "round-0040"
+  ],
+  "tree_listing": [
+    "runs/task-a/rounds/round-0021",
+    "\u251c\u2500\u2500 builder",
+    "\u2502   \u251c\u2500\u2500 events.jsonl",
+    "\u2502   \u251c\u2500\u2500 logs",
+    "\u2502   \u251c\u2500\u2500 node_modules",
+    "\u2502   \u2514\u2500\u2500 workspace",
+    "\u251c\u2500\u2500 COMPLETE",
+    "\u251c\u2500\u2500 reviewer",
+    "\u2502   \u251c\u2500\u2500 events.jsonl",
+    "\u2502   \u251c\u2500\u2500 logs",
+    "\u2502   \u2514\u2500\u2500 review.json",
+    "\u251c\u2500\u2500 status.json",
+    "\u2514\u2500\u2500 tester",
+    "    \u251c\u2500\u2500 events.jsonl",
+    "    \u251c\u2500\u2500 logs",
+    "    \u2514\u2500\u2500 results.xml"
+  ],
+  "versions": {
+    "git": "git version 2.43.0",
+    "traj": "traj 0.1.0"
+  },
+  "warm_seconds_before_git": 41.3,
+  "git": {
+    "commands": {
+      "add": {
+        "cmd": "git add -A",
+        "seconds": 63.17902831197716
+      },
+      "commit": {
+        "cmd": "git commit -m \"round 40\"",
+        "seconds": 8.345183348050341
+      },
+      "status": {
+        "cmd": "git status",
+        "seconds": 2.266832654015161
+      },
+      "push": {
+        "cmd": "git push origin main",
+        "seconds": 17.323652520077303
+      },
+      "clone": {
+        "cmd": "git clone --no-checkout",
+        "seconds": 4.337171719991602
+      },
+      "checkout": {
+        "cmd": "git checkout main",
+        "seconds": 60.83115383598488
+      }
+    },
+    "git_dir_bytes": 368992256,
+    "remote_git_bytes": 34480128,
+    "clone_git_bytes": 169574400
+  },
+  "warm_seconds_before_traj": 5.6,
+  "traj": {
+    "exp_dir": "/workspace/trajfs-demo/exp",
+    "store": "/workspace/trajfs-demo/exp/stores/task-a.trajstore",
+    "store_rel": "stores/task-a.trajstore",
+    "pack": {
+      "cmd": "traj pack runs/task-a --out stores/task-a.trajstore --adapter copilot-cli",
+      "seconds": 11.30051050905604,
+      "summary": "batch 1 in stores/task-a.trajstore: 999460 paths (2.51 GB), 47570 new blobs (125.3 MB raw, 23.6 MB packed), 120 excluded, 0 unchanged skipped, 1 packs, 10.4 s"
+    },
+    "store_bytes": 71839744,
+    "store_apparent_bytes": 71797710,
+    "store_files": 9,
+    "commit": {
+      "cmd": "traj commit stores/task-a.trajstore",
+      "seconds": 7.056625469005667,
+      "output": "committed 9 files of stores/task-a.trajstore"
+    },
+    "exp_git_bytes": 71659520,
+    "status": {
+      "cmd": "git status",
+      "seconds": 0.009561631013639271
+    },
+    "push": {
+      "cmd": "git push origin main",
+      "seconds": 6.835570876020938
+    },
+    "clone": {
+      "cmd": "git clone",
+      "seconds": 4.778758467058651
+    },
+    "first_traceback_path": "rounds/round-0001/reviewer/logs/round-0001/call-00013.stderr",
+    "first_traceback_round": "round-0001",
+    "reads": {
+      "ls": {
+        "cmd": "traj ls -l",
+        "seconds": 0.08127413596957922,
+        "lines": [
+          "d---------     2.51 GB  999460 files  rounds/"
+        ],
+        "total_lines": 1
+      },
+      "ls_rounds": {
+        "cmd": "traj ls rounds",
+        "seconds": 0.3342995169805363,
+        "lines": [
+          "round-0001/",
+          "round-0002/",
+          "round-0003/",
+          "round-0004/",
+          "round-0005/",
+          "round-0006/"
+        ],
+        "total_lines": 40
+      },
+      "du": {
+        "cmd": "traj du --depth 1",
+        "seconds": 1.2463506909552962,
+        "lines": [
+          "     2.51 GB raw       125.3 MB deduplicated      999460 files   47570 blobs  .",
+          "     2.51 GB raw      999460 files  rounds"
+        ],
+        "total_lines": 2
+      },
+      "grep": {
+        "cmd": "traj grep -l -e Traceback --name *.stderr",
+        "seconds": 1.3912162599153817,
+        "lines": [
+          "rounds/round-0001/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0002/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0003/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0004/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0005/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0006/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0007/reviewer/logs/round-0001/call-00013.stderr",
+          "rounds/round-0008/reviewer/logs/round-0001/call-00013.stderr"
+        ],
+        "total_lines": 6638
+      },
+      "sql": {
+        "cmd": "traj sql select round, verdict, tests_passed from (select json_extract_string(text(sha),'$.round')::int as round, json_extract_string(text(sha),'$.verdict') as verdict, json_extract_string(text(sha),'$.tests_passed')::int as tests_passed from files where name = 'review.json') order by round limit 4",
+        "seconds": 0.4239610359072685,
+        "lines": [
+          "+-------+----------+--------------+",
+          "| round | verdict  | tests_passed |",
+          "+-------+----------+--------------+",
+          "| 1     | revise   | 132          |",
+          "| 2     | continue | 30           |",
+          "| 3     | continue | 83           |",
+          "| 4     | continue | 48           |",
+          "+-------+----------+--------------+"
+        ],
+        "total_lines": 8
+      },
+      "cat": {
+        "cmd": "traj cat rounds/round-0001/reviewer/review.json",
+        "seconds": 0.06430368300061673,
+        "lines": [
+          "{",
+          "  \"round\": 1,",
+          "  \"verdict\": \"revise\",",
+          "  \"tests_passed\": 132,",
+          "  \"tests_failed\": 5,",
+          "  \"summary\": \"linking unused prompt timeout borrowing borrowing passed assertion column request module assertion\"",
+          "}"
+        ],
+        "total_lines": 7
+      },
+      "tree": {
+        "cmd": "traj tree --depth 2 rounds/round-0001",
+        "seconds": 0.09008547791745514,
+        "lines": [
+          "rounds/round-0001",
+          "  builder/  (8464 files, 12.7 MB)",
+          "    logs/  (273 files, 997.4 KB)",
+          "    workspace/  (8190 files, 11.7 MB)",
+          "    events.jsonl",
+          "  reviewer/  (275 files, 843.6 KB)",
+          "    logs/  (273 files, 802.4 KB)",
+          "    events.jsonl",
+          "    review.json",
+          "  tester/  (275 files, 856.6 KB)",
+          "    logs/  (273 files, 826.4 KB)",
+          "    events.jsonl"
+        ],
+        "total_lines": 15
+      }
+    },
+    "mount": {
+      "mountpoint": "/workspace/trajfs-demo/mnt/task-a",
+      "seconds": 0.17417126498185098,
+      "output": "mounted /workspace/trajfs-demo/mnt/task-a (pid 3938152, log /workspace/trajfs-demo/mnt/task-a.log)",
+      "ls_rounds": [
+        "round-0001",
+        "round-0002",
+        "round-0003",
+        "round-0004"
+      ],
+      "cat": [
+        "{",
+        "  \"round\": 1,",
+        "  \"verdict\": \"revise\",",
+        "  \"tests_passed\": 132,",
+        "  \"tests_failed\": 5,",
+        "  \"summary\": \"linking unused prompt timeout borrowing borrowing passed assertion column request module assertion\"",
+        "}"
+      ],
+      "cat_seconds": 0.041335879010148346
+    }
+  },
+  "cache": "warm: both sides measured after sync + a full read of the tree",
+  "total_seconds": 324.5
+}
