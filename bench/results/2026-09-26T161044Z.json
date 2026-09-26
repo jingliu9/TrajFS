@@ -1,0 +1,972 @@
+{
+ "schema": 1,
+ "started_utc": "2026-09-26T161044Z",
+ "host": {
+  "cpu": "Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz",
+  "cores": 40,
+  "memory_gb": 187.6,
+  "kernel": "6.8.0-138-generic",
+  "os": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+  "workspace_fs": "ext4",
+  "traj_version": "traj 0.1.0",
+  "git_version": "git version 2.43.0",
+  "python": "3.12.3"
+ },
+ "params": {
+  "sizes": [
+   100000,
+   300000,
+   1000000
+  ],
+  "rounds": [
+   20,
+   30,
+   40
+  ],
+  "read_runs": 5,
+  "seed": 1,
+  "git_timeout_min": 25.0,
+  "git_config": {
+   "user.name": "trajfs-bench",
+   "user.email": "bench@example.invalid",
+   "core.fsmonitor": "false",
+   "gc.auto": "0",
+   "init.defaultBranch": "main",
+   "advice.detachedHead": "false"
+  },
+  "generator": "bench/synthetic_tree.py",
+  "adapter": "copilot-cli",
+  "rules": "default",
+  "cache": "warm: before each measured side the runner syncs, waits for Dirty: in /proc/meminfo to drop below 50 MB (max 60 s) and reads every file once (tar -cf /dev/null); that pass is recorded per size under warmups but never counted"
+ },
+ "sizes_requested": [
+  100000,
+  300000,
+  1000000
+ ],
+ "sizes_run": [
+  100000,
+  300000,
+  1000000
+ ],
+ "sizes_skipped": [],
+ "runs": [
+  {
+   "files_requested": 100000,
+   "rounds": 20,
+   "work_dir": null,
+   "generated": {
+    "root": "/workspace/trajfs-bench/100000/tree",
+    "files": 99830,
+    "rounds": 20,
+    "first_round": 1,
+    "workspace_files": 2430,
+    "logs_per_round": 243,
+    "seconds": 5.9
+   },
+   "raw": {
+    "bytes": 239766962,
+    "file_count": 99830,
+    "bytes_after_extra_round": 260241321
+   },
+   "cache_state": "warm: sync + dirty-page drain + full read pass before every measured side",
+   "warmups": [
+    {
+     "stage": "before trajfs batch 1",
+     "dirty_mb_before": 579,
+     "dirty_mb_after": 0,
+     "settle_seconds": 9.1,
+     "settled": true,
+     "warm_read_seconds": 0.7,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 1",
+     "dirty_mb_before": 47,
+     "dirty_mb_after": 0,
+     "settle_seconds": 0.5,
+     "settled": true,
+     "warm_read_seconds": 0.7,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 2",
+     "dirty_mb_before": 683,
+     "dirty_mb_after": 0,
+     "settle_seconds": 4.8,
+     "settled": true,
+     "warm_read_seconds": 0.7,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before trajfs batch 2",
+     "dirty_mb_before": 50,
+     "dirty_mb_after": 0,
+     "settle_seconds": 0.5,
+     "settled": true,
+     "warm_read_seconds": 0.7,
+     "warm_read_exit": 0
+    }
+   ],
+   "trajfs": {
+    "repo": "/workspace/trajfs-bench/100000/store-repo",
+    "store": "/workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore",
+    "bare_repo": "/workspace/trajfs-bench/100000/store-bare.git",
+    "commit_method": "traj commit <store> (no traj init; plain git repo with a stores/ dir)",
+    "pack": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/100000/tree --out /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0020",
+     "seconds": 1.718,
+     "exit": 0,
+     "stdout_tail": "batch 1 in /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore: 99770 paths (228.7 MB), 8315 new blobs (21.7 MB raw, 4.0 MB packed), 60 excluded, 0 unchanged skipped, 1 packs, 1.6 s\nnext: traj verify -S /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack_summary": {
+     "line": "batch 1 in /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore: 99770 paths (228.7 MB), 8315 new blobs (21.7 MB raw, 4.0 MB packed), 60 excluded, 0 unchanged skipped, 1 packs, 1.6 s",
+     "batch": 1,
+     "paths": 99770,
+     "paths_size": "228.7 MB",
+     "new_blobs": 8315,
+     "new_blobs_raw": "21.7 MB",
+     "new_blobs_packed": "4.0 MB",
+     "excluded": 60,
+     "unchanged_skipped": 0,
+     "packs": 1,
+     "reported_seconds": 1.6
+    },
+    "commit": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore",
+     "seconds": 0.728,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 0.009,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 0.742,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/100000/store-bare.git /workspace/trajfs-bench/100000/store-clone",
+     "seconds": 0.065,
+     "exit": 0
+    },
+    "commit1_sha": "1b66e67a5bcacd4f56893723253ed4bca6306953",
+    "store_bytes_batch1": 6758436,
+    "pack2": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/100000/tree --out /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0021",
+     "seconds": 1.422,
+     "exit": 0,
+     "stdout_tail": "batch 2 in /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore: 7540 paths (19.5 MB), 290 new blobs (795.6 KB raw, 150.7 KB packed), 63 excluded, 99770 unchanged skipped, 1 packs, 1.3 s\nnext: traj verify -S /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack2_summary": {
+     "line": "batch 2 in /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore: 7540 paths (19.5 MB), 290 new blobs (795.6 KB raw, 150.7 KB packed), 63 excluded, 99770 unchanged skipped, 1 packs, 1.3 s",
+     "batch": 2,
+     "paths": 7540,
+     "paths_size": "19.5 MB",
+     "new_blobs": 290,
+     "new_blobs_raw": "795.6 KB",
+     "new_blobs_packed": "150.7 KB",
+     "excluded": 63,
+     "unchanged_skipped": 99770,
+     "packs": 1,
+     "reported_seconds": 1.3
+    },
+    "commit2": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/100000/store-repo/stores/synthetic.trajstore",
+     "seconds": 0.446,
+     "exit": 0
+    },
+    "commit2_sha": "c48b9207df42c1ec377eaa4af12d7ff07688fd9d",
+    "checkout_back": {
+     "cmd": "git checkout -q 1b66e67a5bcacd4f56893723253ed4bca6306953",
+     "seconds": 0.013,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 0.013,
+     "exit": 0
+    },
+    "store_bytes": 7263954,
+    "store_derived_bytes": 135301,
+    "git_dir_bytes": 7217522,
+    "bare_repo_bytes": 7213774,
+    "count_objects": "count: 32\nsize: 6.95 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "store_facts": {
+     "paths": 107310,
+     "distinct_contents": 8605,
+     "event_rows": 9573
+    },
+    "failed": false
+   },
+   "git": {
+    "git_dir": "/workspace/trajfs-bench/100000/raw.git",
+    "bare_repo": "/workspace/trajfs-bench/100000/raw-bare.git",
+    "add": {
+     "cmd": "git add -A",
+     "seconds": 4.716,
+     "exit": 0
+    },
+    "commit": {
+     "cmd": "git commit -q -m raw trajectories, all rounds",
+     "seconds": 1.33,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 0.367,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 3.203,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/100000/raw-bare.git /workspace/trajfs-bench/100000/raw-clone",
+     "seconds": 5.55,
+     "exit": 0
+    },
+    "commit1_sha": "d3ecf03f7d431259993b3247e968bf038d1e5782",
+    "add2": {
+     "cmd": "git add -A",
+     "seconds": 0.899,
+     "exit": 0
+    },
+    "commit2": {
+     "cmd": "git commit -q -m one more round",
+     "seconds": 0.343,
+     "exit": 0
+    },
+    "commit2_sha": "23f33e0910beec44af382e8cc8f7ba57fd1f463f",
+    "checkout_back": {
+     "cmd": "git checkout -q d3ecf03f7d431259993b3247e968bf038d1e5782",
+     "seconds": 0.602,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 1.154,
+     "exit": 0
+    },
+    "count_objects": "count: 10340\nsize: 41.64 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "git_dir_bytes": 21529642,
+    "bare_repo_bytes": 11698654,
+    "aborted": false
+   },
+   "extra_round": {
+    "root": "/workspace/trajfs-bench/100000/tree",
+    "files": 7543,
+    "rounds": 1,
+    "first_round": 21,
+    "workspace_files": 2430,
+    "logs_per_round": 243,
+    "seconds": 5.9
+   }
+  },
+  {
+   "files_requested": 300000,
+   "rounds": 30,
+   "work_dir": null,
+   "generated": {
+    "root": "/workspace/trajfs-bench/300000/tree",
+    "files": 300180,
+    "rounds": 30,
+    "first_round": 1,
+    "workspace_files": 3920,
+    "logs_per_round": 392,
+    "seconds": 13.4
+   },
+   "raw": {
+    "bytes": 797126136,
+    "file_count": 300180,
+    "bytes_after_extra_round": 844112765
+   },
+   "cache_state": "warm: sync + dirty-page drain + full read pass before every measured side",
+   "warmups": [
+    {
+     "stage": "before trajfs batch 1",
+     "dirty_mb_before": 1765,
+     "dirty_mb_after": 0,
+     "settle_seconds": 18.6,
+     "settled": true,
+     "warm_read_seconds": 1.7,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 1",
+     "dirty_mb_before": 139,
+     "dirty_mb_after": 0,
+     "settle_seconds": 1.4,
+     "settled": true,
+     "warm_read_seconds": 1.7,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 2",
+     "dirty_mb_before": 1900,
+     "dirty_mb_after": 0,
+     "settle_seconds": 14.6,
+     "settled": true,
+     "warm_read_seconds": 1.8,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before trajfs batch 2",
+     "dirty_mb_before": 106,
+     "dirty_mb_after": 0,
+     "settle_seconds": 1.1,
+     "settled": true,
+     "warm_read_seconds": 1.8,
+     "warm_read_exit": 0
+    }
+   ],
+   "trajfs": {
+    "repo": "/workspace/trajfs-bench/300000/store-repo",
+    "store": "/workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore",
+    "bare_repo": "/workspace/trajfs-bench/300000/store-bare.git",
+    "commit_method": "traj commit <store> (no traj init; plain git repo with a stores/ dir)",
+    "pack": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/300000/tree --out /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0030",
+     "seconds": 4.395,
+     "exit": 0,
+     "stdout_tail": "batch 1 in /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore: 300090 paths (760.2 MB), 18099 new blobs (49.0 MB raw, 9.1 MB packed), 90 excluded, 0 unchanged skipped, 1 packs, 4.0 s\nnext: traj verify -S /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack_summary": {
+     "line": "batch 1 in /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore: 300090 paths (760.2 MB), 18099 new blobs (49.0 MB raw, 9.1 MB packed), 90 excluded, 0 unchanged skipped, 1 packs, 4.0 s",
+     "batch": 1,
+     "paths": 300090,
+     "paths_size": "760.2 MB",
+     "new_blobs": 18099,
+     "new_blobs_raw": "49.0 MB",
+     "new_blobs_packed": "9.1 MB",
+     "excluded": 90,
+     "unchanged_skipped": 0,
+     "packs": 1,
+     "reported_seconds": 4.0
+    },
+    "commit": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore",
+     "seconds": 2.172,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 0.009,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 2.099,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/300000/store-bare.git /workspace/trajfs-bench/300000/store-clone",
+     "seconds": 0.094,
+     "exit": 0
+    },
+    "commit1_sha": "f181a0314cbc9b6e809b3aa2fbb1b39e43be1d92",
+    "store_bytes_batch1": 20800505,
+    "pack2": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/300000/tree --out /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0031",
+     "seconds": 3.711,
+     "exit": 0,
+     "stdout_tail": "batch 2 in /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore: 16079 paths (44.8 MB), 477 new blobs (1.5 MB raw, 289.3 KB packed), 93 excluded, 300090 unchanged skipped, 1 packs, 3.5 s\nnext: traj verify -S /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack2_summary": {
+     "line": "batch 2 in /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore: 16079 paths (44.8 MB), 477 new blobs (1.5 MB raw, 289.3 KB packed), 93 excluded, 300090 unchanged skipped, 1 packs, 3.5 s",
+     "batch": 2,
+     "paths": 16079,
+     "paths_size": "44.8 MB",
+     "new_blobs": 477,
+     "new_blobs_raw": "1.5 MB",
+     "new_blobs_packed": "289.3 KB",
+     "excluded": 93,
+     "unchanged_skipped": 300090,
+     "packs": 1,
+     "reported_seconds": 3.5
+    },
+    "commit2": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/300000/store-repo/stores/synthetic.trajstore",
+     "seconds": 1.175,
+     "exit": 0
+    },
+    "commit2_sha": "be36dd9596ca3dcc9cfddb0926aff337862bad20",
+    "checkout_back": {
+     "cmd": "git checkout -q f181a0314cbc9b6e809b3aa2fbb1b39e43be1d92",
+     "seconds": 0.012,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 0.014,
+     "exit": 0
+    },
+    "store_bytes": 21798170,
+    "store_derived_bytes": 201182,
+    "git_dir_bytes": 21706936,
+    "bare_repo_bytes": 21703187,
+    "count_objects": "count: 32\nsize: 20.77 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "store_facts": {
+     "paths": 316169,
+     "distinct_contents": 18576,
+     "event_rows": 14058
+    },
+    "failed": false
+   },
+   "git": {
+    "git_dir": "/workspace/trajfs-bench/300000/raw.git",
+    "bare_repo": "/workspace/trajfs-bench/300000/raw-bare.git",
+    "add": {
+     "cmd": "git add -A",
+     "seconds": 13.463,
+     "exit": 0
+    },
+    "commit": {
+     "cmd": "git commit -q -m raw trajectories, all rounds",
+     "seconds": 2.767,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 0.853,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 6.791,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/300000/raw-bare.git /workspace/trajfs-bench/300000/raw-clone",
+     "seconds": 17.25,
+     "exit": 0
+    },
+    "commit1_sha": "396d18518ce7443fe7e8d984861f4192c51e4e9c",
+    "add2": {
+     "cmd": "git add -A",
+     "seconds": 2.24,
+     "exit": 0
+    },
+    "commit2": {
+     "cmd": "git commit -q -m one more round",
+     "seconds": 0.856,
+     "exit": 0
+    },
+    "commit2_sha": "fa170506a0d3cf686572f2c32acbdd3e0f84ba7a",
+    "checkout_back": {
+     "cmd": "git checkout -q 396d18518ce7443fe7e8d984861f4192c51e4e9c",
+     "seconds": 1.478,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 2.684,
+     "exit": 0
+    },
+    "count_objects": "count: 21629\nsize: 87.58 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "git_dir_bytes": 57853876,
+    "bare_repo_bytes": 26304999,
+    "aborted": false
+   },
+   "extra_round": {
+    "root": "/workspace/trajfs-bench/300000/tree",
+    "files": 16082,
+    "rounds": 1,
+    "first_round": 31,
+    "workspace_files": 3920,
+    "logs_per_round": 392,
+    "seconds": 13.4
+   }
+  },
+  {
+   "files_requested": 1000000,
+   "rounds": 40,
+   "work_dir": null,
+   "generated": {
+    "root": "/workspace/trajfs-bench/1000000/tree",
+    "files": 999580,
+    "rounds": 40,
+    "first_round": 1,
+    "workspace_files": 8190,
+    "logs_per_round": 819,
+    "seconds": 35.7
+   },
+   "raw": {
+    "bytes": 2697729062,
+    "file_count": 999580,
+    "bytes_after_extra_round": 2818832824
+   },
+   "cache_state": "warm: sync + dirty-page drain + full read pass before every measured side",
+   "warmups": [
+    {
+     "stage": "before trajfs batch 1",
+     "dirty_mb_before": 4368,
+     "dirty_mb_after": 0,
+     "settle_seconds": 71.9,
+     "settled": true,
+     "warm_read_seconds": 5.1,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 1",
+     "dirty_mb_before": 460,
+     "dirty_mb_after": 0,
+     "settle_seconds": 3.6,
+     "settled": true,
+     "warm_read_seconds": 5.0,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before git commit 2",
+     "dirty_mb_before": 222,
+     "dirty_mb_after": 0,
+     "settle_seconds": 2.2,
+     "settled": true,
+     "warm_read_seconds": 5.1,
+     "warm_read_exit": 0
+    },
+    {
+     "stage": "before trajfs batch 2",
+     "dirty_mb_before": 266,
+     "dirty_mb_after": 0,
+     "settle_seconds": 3.1,
+     "settled": true,
+     "warm_read_seconds": 5.1,
+     "warm_read_exit": 0
+    }
+   ],
+   "trajfs": {
+    "repo": "/workspace/trajfs-bench/1000000/store-repo",
+    "store": "/workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore",
+    "bare_repo": "/workspace/trajfs-bench/1000000/store-bare.git",
+    "commit_method": "traj commit <store> (no traj init; plain git repo with a stores/ dir)",
+    "pack": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/1000000/tree --out /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0040",
+     "seconds": 11.472,
+     "exit": 0,
+     "stdout_tail": "batch 1 in /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore: 999460 paths (2.51 GB), 47570 new blobs (125.3 MB raw, 23.6 MB packed), 120 excluded, 0 unchanged skipped, 1 packs, 10.6 s\nnext: traj verify -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack_summary": {
+     "line": "batch 1 in /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore: 999460 paths (2.51 GB), 47570 new blobs (125.3 MB raw, 23.6 MB packed), 120 excluded, 0 unchanged skipped, 1 packs, 10.6 s",
+     "batch": 1,
+     "paths": 999460,
+     "paths_size": "2.51 GB",
+     "new_blobs": 47570,
+     "new_blobs_raw": "125.3 MB",
+     "new_blobs_packed": "23.6 MB",
+     "excluded": 120,
+     "unchanged_skipped": 0,
+     "packs": 1,
+     "reported_seconds": 10.6
+    },
+    "commit": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore",
+     "seconds": 7.378,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 0.009,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 6.999,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/1000000/store-bare.git /workspace/trajfs-bench/1000000/store-clone",
+     "seconds": 0.226,
+     "exit": 0
+    },
+    "commit1_sha": "37c59cc807d738d7bca3f24c0098c1a368adfbcf",
+    "store_bytes_batch1": 71776692,
+    "pack2": {
+     "cmd": "/workspace/TrajFS/target/release/traj pack /workspace/trajfs-bench/1000000/tree --out /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore --adapter copilot-cli --label round-0041",
+     "seconds": 12.188,
+     "exit": 0,
+     "stdout_tail": "batch 2 in /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore: 41776 paths (115.5 MB), 1002 new blobs (2.7 MB raw, 528.0 KB packed), 123 excluded, 999460 unchanged skipped, 1 packs, 11.6 s\nnext: traj verify -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore  then  traj commit --push /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore\n"
+    },
+    "pack2_summary": {
+     "line": "batch 2 in /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore: 41776 paths (115.5 MB), 1002 new blobs (2.7 MB raw, 528.0 KB packed), 123 excluded, 999460 unchanged skipped, 1 packs, 11.6 s",
+     "batch": 2,
+     "paths": 41776,
+     "paths_size": "115.5 MB",
+     "new_blobs": 1002,
+     "new_blobs_raw": "2.7 MB",
+     "new_blobs_packed": "528.0 KB",
+     "excluded": 123,
+     "unchanged_skipped": 999460,
+     "packs": 1,
+     "reported_seconds": 11.6
+    },
+    "commit2": {
+     "cmd": "/workspace/TrajFS/target/release/traj commit /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore",
+     "seconds": 3.88,
+     "exit": 0
+    },
+    "commit2_sha": "384abe18c205aae8530755dbb93c97abb9aa0b35",
+    "checkout_back": {
+     "cmd": "git checkout -q 37c59cc807d738d7bca3f24c0098c1a368adfbcf",
+     "seconds": 0.013,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 0.015,
+     "exit": 0
+    },
+    "store_bytes": 74065432,
+    "store_derived_bytes": 260359,
+    "git_dir_bytes": 73656451,
+    "bare_repo_bytes": 73652699,
+    "count_objects": "count: 32\nsize: 70.32 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "store_facts": {
+     "paths": 1041236,
+     "distinct_contents": 48572,
+     "event_rows": 18528
+    },
+    "failed": false
+   },
+   "git": {
+    "git_dir": "/workspace/trajfs-bench/1000000/raw.git",
+    "bare_repo": "/workspace/trajfs-bench/1000000/raw-bare.git",
+    "add": {
+     "cmd": "git add -A",
+     "seconds": 43.014,
+     "exit": 0
+    },
+    "commit": {
+     "cmd": "git commit -q -m raw trajectories, all rounds",
+     "seconds": 7.928,
+     "exit": 0
+    },
+    "status": {
+     "cmd": "git status",
+     "seconds": 2.27,
+     "exit": 0
+    },
+    "push": {
+     "cmd": "git push -q -u origin main",
+     "seconds": 17.037,
+     "exit": 0
+    },
+    "clone": {
+     "cmd": "git clone -q /workspace/trajfs-bench/1000000/raw-bare.git /workspace/trajfs-bench/1000000/raw-clone",
+     "seconds": 59.455,
+     "exit": 0
+    },
+    "commit1_sha": "33817cea6a02cfdd9055d6e07997f4473a7ea2fa",
+    "add2": {
+     "cmd": "git add -A",
+     "seconds": 5.901,
+     "exit": 0
+    },
+    "commit2": {
+     "cmd": "git commit -q -m one more round",
+     "seconds": 2.504,
+     "exit": 0
+    },
+    "commit2_sha": "0e896aa0b987ff62d9cf9692b690a3c15e415cf3",
+    "checkout_back": {
+     "cmd": "git checkout -q 33817cea6a02cfdd9055d6e07997f4473a7ea2fa",
+     "seconds": 4.194,
+     "exit": 0
+    },
+    "checkout_forward": {
+     "cmd": "git checkout -q main",
+     "seconds": 7.84,
+     "exit": 0
+    },
+    "count_objects": "count: 54465\nsize: 222.66 MiB\nin-pack: 0\npacks: 0\nsize-pack: 0 bytes\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0 bytes\n",
+    "git_dir_bytes": 177758346,
+    "bare_repo_bytes": 68134677,
+    "aborted": false
+   },
+   "extra_round": {
+    "root": "/workspace/trajfs-bench/1000000/tree",
+    "files": 41779,
+    "rounds": 1,
+    "first_round": 41,
+    "workspace_files": 8190,
+    "logs_per_round": 819,
+    "seconds": 34.9
+   },
+   "read_path": {
+    "runs": 5,
+    "ls_dir": "rounds/round-0001/builder/logs/round-0001",
+    "cat_file": "rounds/round-0001/reviewer/review.json",
+    "round_dir": "rounds/round-0040",
+    "single_shot": [
+     "mount.find",
+     "mount.grep"
+    ],
+    "note": "find/grep are whole-tree walks; find_round/grep_round are bounded to round_dir. Whole-tree walks through the mount are measured once (single_shot), everything else is the median of `runs` runs after one warm-up.",
+    "raw": {
+     "ls": {
+      "cmd": "ls /workspace/trajfs-bench/1000000/tree/rounds/round-0001/builder/logs/round-0001",
+      "runs_seconds": [
+       0.008,
+       0.007,
+       0.008,
+       0.008,
+       0.008
+      ],
+      "exit": 0,
+      "median_ms": 8.0,
+      "single_shot": false
+     },
+     "cat": {
+      "cmd": "cat /workspace/trajfs-bench/1000000/tree/rounds/round-0001/reviewer/review.json",
+      "runs_seconds": [
+       0.005,
+       0.004,
+       0.004,
+       0.004,
+       0.004
+      ],
+      "exit": 0,
+      "median_ms": 4.0,
+      "single_shot": false
+     },
+     "find": {
+      "cmd": "find /workspace/trajfs-bench/1000000/tree -name review.json",
+      "runs_seconds": [
+       2.358,
+       2.394,
+       2.376,
+       2.35,
+       2.339
+      ],
+      "exit": 0,
+      "median_ms": 2358.0,
+      "single_shot": false
+     },
+     "grep": {
+      "cmd": "grep -rl Traceback --include=*.stderr /workspace/trajfs-bench/1000000/tree",
+      "runs_seconds": [
+       4.49,
+       4.46,
+       4.494,
+       4.468,
+       4.526
+      ],
+      "exit": 0,
+      "median_ms": 4490.0,
+      "single_shot": false
+     },
+     "find_round": {
+      "cmd": "find /workspace/trajfs-bench/1000000/tree/rounds/round-0040 -name review.json",
+      "runs_seconds": [
+       0.081,
+       0.081,
+       0.08,
+       0.08,
+       0.079
+      ],
+      "exit": 0,
+      "median_ms": 80.0,
+      "single_shot": false
+     },
+     "grep_round": {
+      "cmd": "grep -rl Traceback --include=*.stderr /workspace/trajfs-bench/1000000/tree/rounds/round-0040",
+      "runs_seconds": [
+       0.19,
+       0.208,
+       0.204,
+       0.189,
+       0.189
+      ],
+      "exit": 0,
+      "median_ms": 190.0,
+      "single_shot": false
+     }
+    },
+    "traj": {
+     "ls": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore ls rounds/round-0001/builder/logs/round-0001",
+      "runs_seconds": [
+       0.082,
+       0.082,
+       0.082,
+       0.082,
+       0.082
+      ],
+      "exit": 0,
+      "median_ms": 82.0,
+      "single_shot": false
+     },
+     "cat": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore cat rounds/round-0001/reviewer/review.json",
+      "runs_seconds": [
+       0.082,
+       0.064,
+       0.079,
+       0.079,
+       0.064
+      ],
+      "exit": 0,
+      "median_ms": 79.0,
+      "single_shot": false
+     },
+     "find": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore find --name review.json",
+      "runs_seconds": [
+       9.176,
+       9.125,
+       9.119,
+       9.135,
+       9.122
+      ],
+      "exit": 0,
+      "median_ms": 9125.0,
+      "single_shot": false
+     },
+     "grep": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore grep -l -e Traceback --name *.stderr",
+      "runs_seconds": [
+       9.909,
+       9.939,
+       9.892,
+       9.924,
+       9.916
+      ],
+      "exit": 0,
+      "median_ms": 9916.0,
+      "single_shot": false
+     },
+     "find_round": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore find rounds/round-0040 --name review.json",
+      "runs_seconds": [
+       0.582,
+       0.564,
+       0.567,
+       0.58,
+       0.582
+      ],
+      "exit": 0,
+      "median_ms": 580.0,
+      "single_shot": false
+     },
+     "grep_round": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore grep -l -e Traceback --name *.stderr --path rounds/round-0040",
+      "runs_seconds": [
+       1.051,
+       1.053,
+       1.05,
+       1.052,
+       1.055
+      ],
+      "exit": 0,
+      "median_ms": 1052.0,
+      "single_shot": false
+     },
+     "sql_count": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore sql select count(*) from files",
+      "runs_seconds": [
+       0.131,
+       0.132,
+       0.128,
+       0.128,
+       0.143
+      ],
+      "exit": 0,
+      "median_ms": 131.0,
+      "single_shot": false
+     },
+     "sql_tool_calls": {
+      "cmd": "/workspace/TrajFS/target/release/traj -S /workspace/trajfs-bench/1000000/store-repo/stores/synthetic.trajstore sql select tool_name, count(*) as calls from events where type = 'tool.execution_complete' group by tool_name order by calls desc",
+      "runs_seconds": [
+       0.12,
+       0.134,
+       0.131,
+       0.13,
+       0.124
+      ],
+      "exit": 0,
+      "median_ms": 130.0,
+      "single_shot": false
+     }
+    },
+    "mount": {
+     "ls": {
+      "cmd": "ls /workspace/trajfs-bench/1000000/mnt/rounds/round-0001/builder/logs/round-0001",
+      "runs_seconds": [
+       0.009,
+       0.009,
+       0.009,
+       0.009,
+       0.009
+      ],
+      "exit": 0,
+      "median_ms": 9.0,
+      "single_shot": false
+     },
+     "cat": {
+      "cmd": "cat /workspace/trajfs-bench/1000000/mnt/rounds/round-0001/reviewer/review.json",
+      "runs_seconds": [
+       0.005,
+       0.005,
+       0.005,
+       0.005,
+       0.005
+      ],
+      "exit": 0,
+      "median_ms": 5.0,
+      "single_shot": false
+     },
+     "find_round": {
+      "cmd": "find /workspace/trajfs-bench/1000000/mnt/rounds/round-0040 -name review.json",
+      "runs_seconds": [
+       0.482,
+       0.492,
+       0.527,
+       0.543,
+       0.419
+      ],
+      "exit": 0,
+      "median_ms": 492.0,
+      "single_shot": false
+     },
+     "grep_round": {
+      "cmd": "grep -rl Traceback --include=*.stderr /workspace/trajfs-bench/1000000/mnt/rounds/round-0040",
+      "runs_seconds": [
+       0.856,
+       0.733,
+       1.002,
+       0.982,
+       0.892
+      ],
+      "exit": 0,
+      "median_ms": 892.0,
+      "single_shot": false
+     },
+     "find": {
+      "cmd": "find /workspace/trajfs-bench/1000000/mnt -name review.json",
+      "runs_seconds": [
+       84.717
+      ],
+      "exit": 0,
+      "median_ms": 84717.0,
+      "single_shot": true
+     },
+     "grep": {
+      "cmd": "grep -rl Traceback --include=*.stderr /workspace/trajfs-bench/1000000/mnt",
+      "runs_seconds": [
+       84.048
+      ],
+      "exit": 0,
+      "median_ms": 84048.0,
+      "single_shot": true
+     },
+     "umount_exit": 0
+    }
+   }
+  }
+ ],
+ "total_seconds": 1082.4,
+ "finished_utc": "2026-09-26T162846Z"
+}
