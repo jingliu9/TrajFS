@@ -46,6 +46,210 @@ SPINNER = "◐◓◑◒"  # ◐◓◑◒ (geometric shapes, in DejaVu Sans Mono)
 
 # --- formatting helpers (shared with the README numbers) --------------------------------------
 
+
+# ---------------------------------------------------------------------------- animated cards
+# The title and end cards are separate casts rendered at a larger font (render.sh joins the GIFs),
+# so their text is bigger than the body's. They share one look: the logo's own "TrajFS" wordmark
+# (demo/wordmark.txt, cut from docs/trajfs-logo.png by make_wordmark.py) drawn with quadrant cells
+# in the logo blue, over which one broad, soft band of grey light unfolds once, left to right, like
+# silk laid across ink (浮光跃金); a pale-gold reflection lies still under it (静影沉璧). When the
+# band has passed, the lines below fade in as a whole.
+
+import math
+
+CARD_COLS, CARD_ROWS = 67, 20           # font 24 px gives the body's pixel size at these dimensions
+CARD_FPS = 15
+BG = (13, 17, 23)                       # THEME["bg"]
+LOGO_BLUE = (31, 111, 229)
+WASH_GREY = (196, 204, 216)             # the silk band
+GOLD_PALE = (236, 208, 150)             # the reflection
+INK_WHITE = (236, 238, 242)
+INK_SOFT = (150, 156, 168)
+PILLAR_GREEN, PILLAR_BLUE, PILLAR_WHITE = (63, 185, 80), (88, 166, 255), (236, 238, 242)
+
+
+def load_wordmark():
+    """Rows of ink coverage (0.0-1.0) per subpixel; two subpixel rows per terminal row."""
+    path = os.path.join(HERE, "wordmark.txt")
+    rows = [[int(ch, 16) / 15.0 for ch in line.strip()] for line in open(path) if line.strip()]
+    if len(rows) % 2:
+        rows.append([0.0] * len(rows[0]))
+    return rows
+
+
+def rgb(fg):
+    return f"{ESC}38;2;{fg[0]};{fg[1]};{fg[2]}m"
+
+
+def rgb_bg(bg):
+    return f"{ESC}48;2;{bg[0]};{bg[1]};{bg[2]}m"
+
+
+def mix(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def silk(x, t, width, t0=0.3, duration=2.6, band=14.0):
+    """One soft band crossing `width` columns between t0 and t0 + duration; 0..1 at column x.
+    Its centre eases in and out, and its profile is a wide gaussian with a softer trailing edge,
+    which is what makes it read as cloth unfolding rather than a bar sweeping."""
+    u = (t - t0) / duration
+    if u <= 0 or u >= 1.25:
+        return 0.0
+    u = min(1.0, u)
+    e = 0.5 - 0.5 * math.cos(math.pi * u)                    # ease in-out
+    centre = -band + (width + 2 * band) * e
+    d = (x - centre) / band
+    if d > 0:
+        return math.exp(-2.2 * d * d)                        # leading edge
+    return math.exp(-0.9 * d * d)                            # trailing edge lingers
+
+
+QUADRANTS = {  # (top-left, top-right, bottom-left, bottom-right) inked -> block element
+    (0, 0, 0, 0): " ", (1, 0, 0, 0): "▘", (0, 1, 0, 0): "▝", (0, 0, 1, 0): "▖", (0, 0, 0, 1): "▗",
+    (1, 1, 0, 0): "▀", (0, 0, 1, 1): "▄", (1, 0, 1, 0): "▌", (0, 1, 0, 1): "▐", (1, 0, 0, 1): "▚",
+    (0, 1, 1, 0): "▞", (1, 1, 1, 0): "▛", (1, 1, 0, 1): "▜", (1, 0, 1, 1): "▙", (0, 1, 1, 1): "▟",
+    (1, 1, 1, 1): "█",
+}
+
+
+def quadrant_rows(cells, col0, threshold=0.4):
+    """cells: subpixel rows of (coverage, RGB) or None, two subpixels per terminal cell in each
+    direction. A cell shows the quadrant block of its inked subpixels in their average colour, so
+    edges keep twice the resolution of plain half-blocks."""
+    out = []
+    for y in range(0, len(cells), 2):
+        line, last = " " * col0, None
+        for x in range(0, len(cells[y]), 2):
+            quad = [cells[y][x], cells[y][x + 1], cells[y + 1][x], cells[y + 1][x + 1]]
+            inked = [q for q in quad if q is not None and q[0] >= threshold]
+            if not inked:
+                line += RESET + " "
+                last = None
+                continue
+            key = tuple(1 if (q is not None and q[0] >= threshold) else 0 for q in quad)
+            col = tuple(round(sum(q[1][i] for q in inked) / len(inked)) for i in range(3))
+            code = rgb(col)
+            if code != last:
+                line += code
+                last = code
+            line += QUADRANTS[key]
+        out.append(line + RESET)
+    return out
+
+
+def render_wordmark(grid, t, col0, reveal=1.0):
+    """The wordmark in logo blue; where the silk band passes, the blue washes towards grey."""
+    width = len(grid[0])
+    cells = []
+    for y, row in enumerate(grid):
+        line = []
+        for x, cov in enumerate(row):
+            if cov <= 0.08:
+                line.append(None)
+            else:
+                wash = silk((x + 0.15 * y) / 2.0, t, width / 2.0)
+                colour = mix(LOGO_BLUE, WASH_GREY, 0.85 * wash)
+                line.append((cov, mix(BG, colour, reveal)))
+        cells.append(line)
+    return quadrant_rows(cells, col0)
+
+
+def render_reflection(grid, t, col0, reveal=1.0, depth_rows=4):
+    """The wordmark mirrored under its baseline in pale gold: still water with a faint slow ripple
+    and a softened echo of the band passing above."""
+    # the baseline is the inked row where the letters stand (most ink in the lower half of the
+    # grid), not the bottom of the j's descender, so the mirror image lines up under the letters
+    width = len(grid[0])
+    lower = range(len(grid) // 2, len(grid))
+    baseline = max(lower, key=lambda y: sum(grid[y]))
+    cells = []
+    for d in range(depth_rows * 2):
+        src = grid[baseline - d] if baseline - d >= 0 else [0.0] * width
+        fade = (1.0 - d / (depth_rows * 2.0)) ** 1.2 * 0.62
+        shift = round(2.0 * math.sin(t * 0.9 + d * 0.5))
+        line = [None] * width
+        for x, cov in enumerate(src):
+            xx = x + shift
+            if cov > 0.08 and 0 <= xx < width:
+                glow = 0.7 + 0.3 * silk(x / 2.0, t - 0.35, width / 2.0, band=18.0)
+                line[xx] = (cov, mix(BG, GOLD_PALE, fade * glow * reveal))
+        cells.append(line)
+    return quadrant_rows(cells, col0, threshold=0.35)
+
+
+def centred(text, cols=CARD_COLS):
+    return " " * max(0, (cols - len(text)) // 2)
+
+
+def fade_line(text, t, t0, base, bold=False, dur=1.1):
+    """A centred line fading in as a whole between t0 and t0 + dur."""
+    a = min(1.0, max(0.0, (t - t0) / dur))
+    return centred(text) + (BOLD if bold else "") + rgb(mix(BG, base, a)) + text + RESET
+
+
+def fade_pillars(t, t0, dur=1.1, gap="   "):
+    """The three pillars in their own colours, fading in together."""
+    parts = [("Faster for Git.", PILLAR_GREEN), ("Friendly to agents.", PILLAR_BLUE), ("Still files for humans.", PILLAR_WHITE)]
+    a = min(1.0, max(0.0, (t - t0) / dur))
+    width = sum(len(p) for p, _ in parts) + len(gap) * (len(parts) - 1)
+    line = " " * max(0, (CARD_COLS - width) // 2) + BOLD
+    for k, (text, base) in enumerate(parts):
+        line += rgb(mix(BG, base, a)) + text + (gap if k < len(parts) - 1 else "")
+    return line + RESET
+
+
+def play_card(c, seconds, draw):
+    """Emit `seconds` of frames at CARD_FPS; `draw(t)` returns the list of (row, line) to paint."""
+    n = int(seconds * CARD_FPS)
+    for k in range(n):
+        t = k / CARD_FPS
+        frame = ESC + "H"
+        for row, line in draw(t):
+            frame += f"{ESC}{row};1H{ESC}2K" + line
+        c.out(frame, 1.0 / CARD_FPS if k else 0.0)
+
+
+def wordmark_card(seconds, lines_below):
+    """A card cast: wordmark and reflection at the top, then `lines_below` as (row, t0, render)
+    where render(t, t0) returns the line. Both cards use this so they stay consistent."""
+    c = Cast()
+    c.out(ESC + "?25l")
+    c.clear()
+    grid = load_wordmark()
+    col0 = (CARD_COLS - len(grid[0]) // 2) // 2
+    top = 2
+
+    def draw(t):
+        reveal = min(1.0, t / 0.7)
+        wm = render_wordmark(grid, t, col0, reveal)
+        out = [(top + i, l) for i, l in enumerate(wm)]
+        out += [(top + len(wm) + i, l) for i, l in enumerate(render_reflection(grid, t, col0, reveal))]
+        out += [(row, render(t, t0)) for row, t0, render in lines_below]
+        return out
+
+    play_card(c, seconds, draw)
+    return c
+
+
+def title_card():
+    # the band has crossed by about 3.0 s; the lines follow it
+    return wordmark_card(7.5, [
+        (14, 3.0, lambda t, t0: fade_line("Make millions of AI-agent trajectory files gittable", t, t0, INK_WHITE, bold=True)),
+        (16, 3.8, lambda t, t0: fade_pillars(t, t0)),
+    ])
+
+
+def end_card(url):
+    return wordmark_card(8.5, [
+        (13, 3.0, lambda t, t0: fade_line("Gittable version control for trajectories", t, t0, INK_WHITE, bold=True)),
+        (14, 3.0, lambda t, t0: fade_line("ultra-fast, human-readable files, agent-native", t, t0, INK_SOFT)),
+        (16, 3.8, lambda t, t0: fade_pillars(t, t0)),
+        (18, 4.6, lambda t, t0: fade_line(url, t, t0, INK_SOFT)),
+    ])
+
+
 def index_scale():
     """The largest stage of the newest bench/results/index-scale-*.json, if any: what git add costs once the
     repository already tracks millions of paths, plus the cold-disk read rate. None when not measured."""
@@ -306,15 +510,7 @@ def build(m, traj, offline):
     rnd = tj["first_traceback_round"]
     first_hit = tj["first_traceback_path"]
 
-    # 0. title card ------------------------------------------------------------------------------
     c.out(ESC + "?25l")   # hide the cursor; typing is visible enough and it keeps frames clean
-    c.marker("title")
-    c.clear()
-    c.out(f"{ESC}{ROWS // 2 - 2};1H")
-    c.line("   " + BOLD + WHITE + "TrajFS" + RESET + "  " + DIM + "·" + RESET + "  make millions of AI-agent trajectory files gittable")
-    c.line()
-    c.line("   " + DIM + "an agent run  →  one Git-friendly store  →  files for agents and humans")
-    c.wait(2.6)
 
     # 1. a million files --------------------------------------------------------------------------
     c.marker("1 million files")
@@ -363,7 +559,7 @@ def build(m, traj, offline):
     c.line()
     c.line(YELLOW + "  ✗ every command walks a million files     ✗ every clone and checkout pays again", 0.4)
     c.line(YELLOW + "  ✗ history grows by a whole tree per round  ✗ GitHub file-count and size limits", 0.6)
-    c.wait(3.5)
+    c.wait(5.0)
 
     # 3. the TrajFS way ------------------------------------------------------------------------------
     c.marker("3 trajfs")
@@ -393,7 +589,7 @@ def build(m, traj, offline):
         c.line(f"    {name:<22}{fmt_time(a):>18}{fmt_time(b):>16}   {GREEN_B}{fmt_factor(a / max(b, 1e-3)):>7} faster{RESET}  {DIM}{note}", 0.3)
     a, b = m["git"]["git_dir_bytes"], tj["store_bytes"]
     c.line(f"    {'repository size':<22}{fmt_size(a):>18}{fmt_size(b):>16}   {GREEN_B}{fmt_factor(a / b):>7} smaller{RESET}  {DIM}.git vs store", 0.3)
-    c.wait(4.0)
+    c.wait(7.0)
 
     # 4. split view ---------------------------------------------------------------------------------
     c.marker("4 read")
@@ -488,19 +684,6 @@ def build(m, traj, offline):
     R.line(DIM + "# read-only files; any editor works", 0.15)
     c.wait(4.0)
 
-    # 5. end card ------------------------------------------------------------------------------------
-    c.marker("5 end")
-    c.clear()
-    c.out(f"{ESC}{ROWS // 2 - 5};1H")
-    c.line("   " + BOLD + WHITE + "TrajFS", 0.0)
-    c.line()
-    c.line("   Gittable version control for trajectories —", 0.0)
-    c.line("   ultra-fast, human-readable files, agent-native", 0.0)
-    c.line()
-    c.line(f"   {GREEN_B}Faster for Git.{RESET}   {BLUE_B}Friendly to agents.{RESET}   {WHITE_B}Still files for humans.", 0.7)
-    c.line()
-    c.line("   " + DIM + "github.com/jingliu9/TrajFS", 0.7)
-    c.wait(3.0)
     return c
 
 
@@ -518,6 +701,12 @@ def main():
     c = build(m, a.traj, a.offline)
     c.write(a.out)
     print(f"wrote {a.out}: {len(c.events)} events, {c.t:.1f} s")
+    # the cards: separate casts at card dimensions; render.sh draws them at a larger font
+    stem = a.out[:-5] if a.out.endswith(".cast") else a.out
+    for name, card in (("title", title_card()), ("end", end_card("github.com/jingliu9/TrajFS"))):
+        path = f"{stem}-{name}.cast"
+        card.write(path, width=CARD_COLS, height=CARD_ROWS)
+        print(f"wrote {path}: {len(card.events)} frames, {card.t:.1f} s")
     prev = None
     for t, label in c.markers + [(c.t, "end")]:
         if prev:

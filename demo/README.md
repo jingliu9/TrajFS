@@ -25,9 +25,14 @@ python3 demo/measure.py
 # 2. Compose the asciicast (seconds; re-runs traj ls/cat/grep/sql live against the measured store).
 python3 demo/record.py
 
-# 3. Render the GIF with agg (about a minute).
-demo/render.sh
+# 3. Render the GIF with agg (about a minute). record.py writes three casts: the body and the
+#    title and end cards, which render.sh draws at a larger font and joins with Pillow
+#    (POSTER_PY=/path/to/python-with-pillow); without Pillow only the body is produced.
+POSTER_PY=venv/bin/python demo/render.sh
 ```
+
+The cards draw the logo's "TrajFS" wordmark with quadrant block cells from `demo/wordmark.txt`, which
+`demo/make_wordmark.py` (Pillow) cuts from `docs/trajfs-logo.png`; rerun it only if the logo changes.
 
 `measure.py --keep-git` keeps the multi-GB raw-tree git repositories; by default they are deleted
 after their sizes are recorded. The synthetic tree (`bench/synthetic_tree.py`) and the packed store

@@ -1,37 +1,85 @@
 #!/usr/bin/env bash
-# Render the demo cast to a GIF with agg (https://github.com/asciinema/agg).
+# Render the demo to a GIF with agg (https://github.com/asciinema/agg).
 #
-#   demo/render.sh                                   # trajfs-demo.cast -> trajfs-demo.gif
+#   demo/render.sh                                   # trajfs-demo{,-title,-end}.cast -> trajfs-demo.gif
 #   demo/render.sh demo/trajfs-demo.small.cast demo/trajfs-demo.small.gif
 #
+# record.py writes three casts: the body (100x30, font 16) and the title and end cards (67x20,
+# font 24, so their text is larger). Each is rendered on its own and the GIFs are joined with
+# Pillow (POSTER_PY selects a python that has it; without Pillow only the body GIF is produced).
 # The theme comes from the cast header (record.py); pass AGG_THEME=dracula etc. to override.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 cast="${1:-$here/trajfs-demo.cast}"
 gif="${2:-$here/trajfs-demo.gif}"
+stem="${cast%.cast}"
 agg="${AGG:-$(command -v agg || echo "$HOME/.cargo/bin/agg")}"
 font_dir="${FONT_DIR:-/usr/share/fonts/truetype/dejavu}"
+py="${POSTER_PY:-python3}"
 
-args=(
-  --font-dir "$font_dir"
-  --font-family "DejaVu Sans Mono"
-  --font-size "${FONT_SIZE:-16}"
-  --line-height 1.3
-  --fps-cap "${FPS:-20}"
-  --idle-time-limit 3
-  --last-frame-duration 4
-  --speed "${SPEED:-1}"
-)
-[[ -n "${AGG_THEME:-}" ]] && args+=(--theme "$AGG_THEME")
+render() {  # cast gif font-size
+  local args=(
+    --font-dir "$font_dir"
+    --font-family "DejaVu Sans Mono"
+    --font-size "$3"
+    --line-height 1.3
+    --fps-cap "${FPS:-20}"
+    --idle-time-limit 3
+    --last-frame-duration "${4:-0.5}"
+    --speed "${SPEED:-1}"
+  )
+  [[ -n "${AGG_THEME:-}" ]] && args+=(--theme "$AGG_THEME")
+  "$agg" -q "${args[@]}" "$1" "$2"
+}
 
-"$agg" -q "${args[@]}" "$cast" "$gif"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+render "$cast" "$tmp/body.gif" "${FONT_SIZE:-16}" 4
+parts=("$tmp/body.gif")
+if [[ -f "$stem-title.cast" && -f "$stem-end.cast" ]]; then
+  render "$stem-title.cast" "$tmp/title.gif" "${CARD_FONT_SIZE:-24}" 0.6
+  render "$stem-end.cast" "$tmp/end.gif" "${CARD_FONT_SIZE:-24}" 4
+  parts=("$tmp/title.gif" "$tmp/body.gif" "$tmp/end.gif")
+fi
+
+# join the parts; card frames are scaled to the body's pixel size when the fonts do not line up
+if "$py" - "$gif" "${parts[@]}" <<'PY'
+import sys
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit(1)
+out, parts = sys.argv[1], sys.argv[2:]
+frames, durations = [], []
+size = None
+for path in parts:
+    im = Image.open(path)
+    if size is None:
+        size = Image.open(parts[1] if len(parts) > 1 else parts[0]).size
+    try:
+        while True:
+            f = im.convert("RGB")
+            if f.size != size:
+                f = f.resize(size, Image.LANCZOS)
+            frames.append(f)
+            durations.append(max(20, int(im.info.get("duration", 50))))
+            im.seek(im.tell() + 1)
+    except EOFError:
+        pass
+frames[0].save(out, save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True)
+print(f"{out}: {len(frames)} frames, {sum(durations) / 1000:.1f} s")
+PY
+then :; else
+  cp "$tmp/body.gif" "$gif"
+  echo "Pillow not available for $py: wrote the body only to $gif"
+fi
 ls -l "$gif" | awk '{printf "%s  %.1f MB\n", $NF, $5/1048576}'
 
 # Optional poster frame for places that cannot animate: the git-vs-TrajFS comparison table, i.e.
-# the last frame before the section-4 screen clear (POSTER_CLEAR=4: the 4th full-screen change after
-# the title card). Needs Pillow (POSTER_PY selects the interpreter); skipped otherwise.
+# the last body frame before the section-4 screen clear (POSTER_CLEAR=3: the 3rd full-screen change
+# in the body cast). Needs Pillow; skipped otherwise.
 png="${gif%.gif}.png"
-"${POSTER_PY:-python3}" - "$gif" "$png" "${POSTER_CLEAR:-4}" <<'PY' 2>/dev/null || true
+"$py" - "$tmp/body.gif" "$png" "${POSTER_CLEAR:-3}" <<'PY' 2>/dev/null || true
 import sys
 try:
     from PIL import Image, ImageChops
