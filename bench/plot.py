@@ -169,7 +169,7 @@ def plot_git_commands(data, out):
     ops = [operations(r) for r in runs]
     n_ops = 5
     fig, axes = plt.subplots(1, n_ops, figsize=(9.2, 4.0), sharey=True, dpi=DPI)
-    fig.subplots_adjust(left=0.075, right=0.995, top=0.71, bottom=0.15, wspace=0.10)
+    fig.subplots_adjust(left=0.075, right=0.995, top=0.71, bottom=0.19, wspace=0.10)
     xs = list(range(len(runs)))
     w = 0.30
     ymin = 1e-3
@@ -200,6 +200,7 @@ def plot_git_commands(data, out):
         ax.set_xticklabels([size_label(r["files_requested"]) for r in runs])
         ax.set_xlim(-0.6, len(runs) - 0.4)
         ax.tick_params(axis="x", length=0, pad=3)
+        ax.set_xlabel("files in the run", color=INK2, fontsize=8, labelpad=4)
         ax.grid(True, axis="y", which="major")
         ax.grid(False, axis="y", which="minor")
         ax.yaxis.set_major_locator(LogLocator(base=10, numticks=8))
@@ -210,7 +211,7 @@ def plot_git_commands(data, out):
         ax.spines["left"].set_visible(k == 0)
     fig.text(0.075, 0.965, "Git commands: raw trajectory tree vs TrajFS store", fontsize=11,
              fontweight="semibold", color=INK, ha="left", va="top")
-    fig.text(0.075, 0.905, "Whole-process wall time; the number above each pair is the speedup; x axis: files per tree.\n"
+    fig.text(0.075, 0.905, "Whole-process wall time on runs of 100k, 300k, and 1M files; the number above each pair is the speedup.\n"
              "add + commit is git add -A + git commit versus traj pack + traj commit; both read every byte of the tree\n"
              "(traj pack re-reads unchanged files as its change check). checkout is the round trip between the two commits.",
              fontsize=7.8, color=INK2, ha="left", va="top", linespacing=1.4)

@@ -24,7 +24,7 @@ python3 bench/plot.py            # newest bench/results/*.json -> docs/benchmark
 
 `run.py` needs only the Python standard library; `plot.py` needs matplotlib. Git runs with an isolated configuration (`user.name=trajfs-bench, user.email=bench@example.invalid, core.fsmonitor=false, gc.auto=0, init.defaultBranch=main, advice.detachedHead=false`), a local bare repository as the remote, and `git clone` from that bare repository. The raw tree's repository keeps its `GIT_DIR` outside the tree so `traj pack` never sees a `.git` directory. TrajFS packs with `--adapter copilot-cli` and the default retention rules, commits with `traj commit <store>` inside a plain git repository that holds only the store, and adds the extra round as a second batch (`--label`). Any single command over 25 minutes is recorded as aborted and larger sizes are skipped.
 
-All measurements are **warm-cache**: before each measured side the runner syncs, waits for Dirty: in /proc/meminfo to drop below 50 MB (max 60 s) and reads every file once (find | xargs cat); that pass is recorded per size under warmups but never counted. Both sides therefore start from an identical page-cache state.
+All measurements are **warm-cache**: before each measured side the runner syncs, waits for Dirty: in /proc/meminfo to drop below 50 MB (max 60 s) and ran a read pass over the tree (in this run: tar -cf /dev/null, which GNU tar short-circuits without reading contents; the data was still resident from generation, so the state was warm all the same; the runner now reads every file through cat); that pass is recorded per size under warmups but never counted. Both sides therefore start from an identical page-cache state.
 
 ## Git commands
 
