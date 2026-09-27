@@ -11,30 +11,40 @@
   <meta property="og:description" content="Faster for Git. Friendly to agents. Still files for humans.">
   <meta property="og:image" content="assets/demo-poster.png">
   <meta property="og:type" content="website">
+  <meta name="theme-color" content="#f2f0e9">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<nav class="nav">
-  <div class="wrap">
-    <a class="brand" href="#top"><img src="assets/favicon.png" alt="">TrajFS</a>
-    <ul>
-      <li><a href="#quick-start">Quick start</a></li>
-      <li class="opt"><a href="#how-it-works">How it works</a></li>
-      <li><a href="#benchmarks">Benchmarks</a></li>
-      <li class="opt"><a href="#install">Install</a></li>
-      <li class="opt"><a href="#docs">Docs</a></li>
-      <li><a class="gh" href="https://github.com/jingliu9/TrajFS">GitHub</a></li>
-    </ul>
+<nav class="site-nav" aria-label="Primary navigation">
+  <div class="nav-inner">
+    <a class="wordmark" href="#top" aria-label="TrajFS, top">
+      <span class="nav-seal" aria-hidden="true">迹</span>
+      <span>TrajFS</span>
+    </a>
+    <div class="nav-links">
+      <a href="#quick-start">Quick start</a>
+      <a class="opt" href="#how-it-works">How it works</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a class="opt" href="#install">Install</a>
+      <a class="opt" href="#docs">Docs</a>
+      <a href="https://github.com/jingliu9/TrajFS">GitHub</a>
+    </div>
   </div>
 </nav>
 
-<header class="hero" id="top">
-  <div class="wrap">
-    <div>
-      <h1>Make millions of AI-agent trajectory files <span>gittable</span>.</h1>
-      <p class="tag">Faster for Git. Friendly to agents. Still files for humans.</p>
-      <p class="lead">AI-agent runs produce millions of tiny, duplicate-heavy files, and Git operations on them take hours.
+<header class="hero" id="top" data-ink-hero>
+  <canvas class="hero-canvas" data-ink-canvas aria-hidden="true"></canvas>
+  <div class="hero-grain" aria-hidden="true"></div>
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <p class="hero-kicker">Gittable version control for AI-agent trajectories</p>
+      <div class="hero-title-row">
+        <h1>TrajFS</h1>
+        <img class="hero-mark" src="assets/mark.png" alt="" aria-hidden="true">
+      </div>
+      <p class="hero-tagline">Make millions of AI-agent trajectory files gittable.<br>Faster for Git. Friendly to agents. Still files for humans.</p>
+      <p class="hero-lead">AI-agent runs produce millions of tiny, duplicate-heavy files, and Git operations on them take hours.
         TrajFS packs a run into one compact, queryable store without changing the agents. Git handles the store in seconds,
         analysis agents query it, and humans still open it as files.</p>
       <div class="cta">
@@ -42,8 +52,10 @@
         <a class="btn" href="https://github.com/jingliu9/TrajFS">View on GitHub</a>
       </div>
     </div>
-    <img class="logo" src="assets/logo.png" alt="TrajFS logo: agents, humans, and git connected through TrajFS" width="900" height="401">
   </div>
+  <a class="hero-scroll" href="#quick-start" aria-label="Continue to the quick start">
+    <span aria-hidden="true">&#8595;</span>
+  </a>
 </header>
 
 <section class="demo">
@@ -272,12 +284,15 @@ traj --help</code></pre>
   </div>
 </section>
 
-<footer>
-  <div class="wrap">
-    <div>TrajFS is MIT licensed. <a href="https://github.com/jingliu9/TrajFS">Source on GitHub</a>.</div>
-    <div>Logo and figures: see the repository for credits. Fonts: Barlow Semi Condensed (OFL).</div>
+<footer class="site-footer">
+  <div class="footer-inner">
+    <p><span aria-hidden="true">迹</span> TrajFS is MIT licensed. <a href="https://github.com/jingliu9/TrajFS">Source on GitHub</a>.</p>
+    <nav aria-label="Footer navigation">
+      <a href="#top">Back to top <span aria-hidden="true">&#8593;</span></a>
+    </nav>
   </div>
 </footer>
+<script src="js/ink-grid.js" defer></script>
 
 </body>
 </html>
