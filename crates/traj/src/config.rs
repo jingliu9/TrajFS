@@ -32,6 +32,10 @@ pub struct HookConfig {
     pub max_added_paths: usize,
     #[serde(default = "default_max_bytes")]
     pub max_file_bytes: u64,
+    /// Bytes of new content above which `traj commit --push` uploads in several pushes, each below
+    /// this size, so a Git host's per-push limit (2 GB on GitHub) is never hit by one large batch.
+    #[serde(default = "default_max_push_bytes")]
+    pub max_push_bytes: u64,
 }
 
 impl Default for HookConfig {
@@ -40,8 +44,16 @@ impl Default for HookConfig {
             raw_patterns: Vec::new(),
             max_added_paths: default_max_paths(),
             max_file_bytes: default_max_bytes(),
+            max_push_bytes: default_max_push_bytes(),
         }
     }
+}
+
+/// Well under GitHub's 2 GB per-push limit, leaving room for pack overhead.
+pub const DEFAULT_MAX_PUSH_BYTES: u64 = 1536 * 1024 * 1024;
+
+fn default_max_push_bytes() -> u64 {
+    DEFAULT_MAX_PUSH_BYTES
 }
 
 fn default_max_paths() -> usize {

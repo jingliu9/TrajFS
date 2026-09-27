@@ -53,7 +53,8 @@ traj pack /data/tasks/task-a --out stores/task-a.trajstore --adapter copilot-cli
 traj commit --push stores/task-a.trajstore
 ```
 
-A million-path run becomes a handful of files that Git handles in seconds ([benchmarks](#benchmarks)).
+A million-path run becomes a handful of files that Git handles in seconds ([benchmarks](#benchmarks)). Uploads
+larger than a host's per-push limit are sent in parts automatically ([details](#automate-archival)).
 
 **3. Read it back.** No Git checkout, no extraction.
 
@@ -423,6 +424,24 @@ With a Git remote configured, archive manually or watch for completed rounds:
 ```bash
 traj pack /data/experiments/task-1 --label round-0001 &&
   traj commit --push stores/task-1.trajstore
+
+# Or keep packing and committing when new completion markers appear:
+traj watch --commit --push
+```
+
+`traj commit` commits only the selected store, preserving unrelated staged and unstaged work. The hook checks staged
+Git content, rejecting configured raw-run paths, incomplete stores, and oversized artifacts. Defaults allow at most
+10,000 added paths per commit and 65 MiB per file. `traj hook check-tree HEAD` checks a committed tree.
+
+`--push` respects the host's per-push limit. When a batch adds more new content than `hook.max_push_bytes` in
+`trajfs.toml` (default 1.5 GiB, well under GitHub's 2 GB per push; `--push-limit 800M` overrides it), the upload is
+sent in parts: each part's blobs go to a temporary ref on the remote, the branch is pushed once the remote holds them
+all, and the temporary refs are deleted. History stays one commit per batch; only the transfer is split.
+
+For nested source directories, default store paths encode the data-root-relative path so matching basenames do not
+collide. In a configured repository, `traj mount <mountpoint>` without a store selection mounts all stores under
+`store_root`; unset `TRAJ_STORE` first if you exported it above. Add `--save` to remember the mountpoint and write
+repository-level VS Code settings.
 
 ### Delete one trajectory
 

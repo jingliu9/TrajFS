@@ -186,6 +186,7 @@ pub fn watch(a: WatchArgs) -> Result<i32> {
                         store: store.display().to_string(),
                         push: a.push,
                         message: None,
+                        push_limit: None,
                     })?;
                 }
                 done += 1;
