@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TrajFS</title>
+  <meta name="description" content="TrajFS makes millions of AI-agent trajectory files gittable: pack a run into a compact, queryable store, commit the store, and read it back as an agent or as ordinary files.">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <meta property="og:title" content="TrajFS: make millions of AI-agent trajectory files gittable">
+  <meta property="og:description" content="Faster for Git. Friendly to agents. Still files for humans.">
+  <meta property="og:image" content="assets/demo-poster.png">
+  <meta property="og:type" content="website">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="assets/favicon.png" alt="">TrajFS</a>
+    <ul>
+      <li><a href="#quick-start">Quick start</a></li>
+      <li class="opt"><a href="#how-it-works">How it works</a></li>
+      <li><a href="#benchmarks">Benchmarks</a></li>
+      <li class="opt"><a href="#install">Install</a></li>
+      <li class="opt"><a href="#docs">Docs</a></li>
+      <li><a class="gh" href="https://github.com/jingliu9/TrajFS">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <h1>Make millions of AI-agent trajectory files <span>gittable</span>.</h1>
+      <p class="tag">Faster for Git. Friendly to agents. Still files for humans.</p>
+      <p class="lead">AI-agent runs produce millions of tiny, duplicate-heavy files, and Git operations on them take hours.
+        TrajFS packs a run into one compact, queryable store without changing the agents. Git handles the store in seconds,
+        analysis agents query it, and humans still open it as files.</p>
+      <div class="cta">
+        <a class="btn primary" href="#quick-start">Get started</a>
+        <a class="btn" href="https://github.com/jingliu9/TrajFS">View on GitHub</a>
+      </div>
+    </div>
+    <img class="logo" src="assets/logo.png" alt="TrajFS logo: agents, humans, and git connected through TrajFS" width="900" height="401">
+  </div>
+</header>
+
+<section class="demo">
+  <div class="wrap">
+    <div class="frame">
+      <img src="assets/demo.gif" alt="Terminal recording: a million-file agent run, git taking minutes on it, then traj pack and commit in seconds, and the store read back by an agent and by a human through a mount" width="983" height="645">
+    </div>
+    <p class="cap muted small">Recorded on a synthetic 1,000,000-file run: 40 rounds of a coding agent, 5% distinct content, the rest byte-identical checkpoints.
+      Every number shown is measured; <code>demo/</code> in the repository regenerates it.</p>
+  </div>
+</section>
+
+<section class="pillars">
+  <div class="wrap">
+    <div class="grid3">
+      <div class="card">
+        <div class="eyebrow">Faster for Git</div>
+        <h3>Commit a store, not a million paths</h3>
+        <p>A run becomes a handful of files: content-addressed packs and a columnar catalog. Status, clone, and checkout
+          stop paying per trajectory file.</p>
+      </div>
+      <div class="card">
+        <div class="eyebrow">Friendly to agents</div>
+        <h3>Query, don't walk</h3>
+        <p><code>traj grep</code>, <code>traj find</code>, and SQL over parsed event tables answer "which round first hit a
+          Traceback?" without touching a million inodes. A shipped skill teaches coding agents the verbs.</p>
+      </div>
+      <div class="card">
+        <div class="eyebrow">Still files for humans</div>
+        <h3>Mount it, open it in VS Code</h3>
+        <p>A read-only FUSE mount serves the store as ordinary files. New batches appear without remounting;
+          <code>traj extract</code> gives writable copies.</p>
+      </div>
+    </div>
+    <div class="figure">
+      <img src="assets/interfaces.png" alt="Generating agents write files; TrajFS packs them; analysis agents, Git, and humans read the store through their own interfaces" width="2000" height="629">
+    </div>
+  </div>
+</section>
+
+<section class="block" id="quick-start">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Quick start</h2>
+      <p>Archive one task in three steps. The example is a coding agent that worked in rounds under <code>/data/tasks/task-a</code>;
+        TrajFS does not require this layout.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <div>
+          <h3>Pack the raw tree into a store</h3>
+          <p>The source stays where it is. The adapter parses the runner's event streams into queryable tables; build products are excluded by default.
+            Run it again later and only what changed is appended.</p>
+<pre><code>traj pack /data/tasks/task-a --out stores/task-a.trajstore --adapter copilot-cli</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <div>
+          <h3>Commit the store, not the raw files</h3>
+          <p>A million-path run becomes a handful of files that Git handles in seconds.</p>
+<pre><code>traj commit --push stores/task-a.trajstore</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <div>
+          <h3>Read it back</h3>
+          <p>No Git checkout, no extraction. <code>traj grep</code> searches each distinct content once, so duplicate checkpoints cost nothing extra.</p>
+<pre><code>export TRAJ_STORE="$PWD/stores/task-a.trajstore"
+
+traj ls -l rounds/round-0007/reviewer                    <span class="c"># list, like ls</span>
+traj cat rounds/round-0007/reviewer/review.json          <span class="c"># read one file</span>
+traj find --name review.json                             <span class="c"># every review, every round</span>
+traj grep -l -e Traceback --name '*.stderr'              <span class="c"># which logs failed</span>
+traj sql "SELECT tool_name, count(*) AS calls FROM events
+          WHERE type = 'tool.execution_complete' GROUP BY 1 ORDER BY 2 DESC"
+traj verify --deep                                       <span class="c"># every stored byte matches its hash</span></code></pre>
+        </div>
+      </div>
+    </div>
+    <div class="two">
+      <div class="card">
+        <h3>Agents use the same verbs</h3>
+        <p>Export a skill and an <code>AGENTS.md</code> section into your repository, so Claude Code, Codex, or Copilot reach for
+          <code>traj grep</code>, <code>traj sql</code>, and <code>traj cat</code> instead of walking a million files.</p>
+<pre><code>traj skill export --out .</code></pre>
+      </div>
+      <div class="card">
+        <h3>Humans get files</h3>
+        <p>On Linux, mount the store read-only and open it in a terminal or VS Code. Newly packed batches show up without remounting.</p>
+<pre><code>traj mount ~/traj-mnt/task-a --daemon
+ls ~/traj-mnt/task-a/rounds/round-0007/reviewer
+code -r ~/traj-mnt/task-a
+traj umount ~/traj-mnt/task-a</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="how-it-works">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>How it works</h2>
+      <p>TrajFS separates <em>what the bytes are</em> from <em>where they appear</em>. That single decision is what makes
+        millions of duplicate-heavy files cheap.</p>
+    </div>
+    <div class="points">
+      <div class="point"><h3>Content-addressed packs</h3><p>Every file is hashed with SHA-256 and stored once, in Zstandard-compressed pack frames. A checkpoint that repeats yesterday's workspace adds paths, not bytes.</p></div>
+      <div class="point"><h3>A columnar catalog</h3><p>Paths, directory summaries, exclusions, and the hash-to-pack index are Parquet segments. Listing or finding is a column scan, and the same segments are the tables behind <code>traj sql</code>.</p></div>
+      <div class="point"><h3>Published batches</h3><p>Each pack appends a batch and publishes it in the manifest at the end. Readers only ever see complete batches; an interrupted pack leaves nothing visible.</p></div>
+      <div class="point"><h3>Derived event tables</h3><p>Adapters parse Copilot CLI, Codex CLI, Claude Code, generic JSONL, or a TOML-described layout into event tables that embedded DuckDB queries. <code>text(sha)</code> reaches stored content from SQL.</p></div>
+      <div class="point"><h3>A read-only file projection</h3><p><code>traj mount</code> serves the catalog through FUSE with a bounded memory budget, so editors, diff tools, and shell scripts see ordinary files without extraction.</p></div>
+      <div class="point"><h3>Git sees only stores</h3><p><code>traj commit</code> stages the store, a pre-commit hook refuses raw run trees and oversized artifacts, and every generated file stays under a size Git hosts accept.</p></div>
+    </div>
+    <div class="layout">
+      <div>
+        <h3>A store is a portable directory</h3>
+<pre><code>task-a.trajstore/
+  MANIFEST.json                <span class="c">published batches and artifact inventory</span>
+  catalog/*.parquet            <span class="c">paths, directory summaries, exclusions</span>
+  packs/*.pack                 <span class="c">compressed content</span>
+  packs/index-*.parquet        <span class="c">hash-to-pack locations</span>
+  derived/&lt;adapter&gt;/*.parquet  <span class="c">rebuildable event tables</span></code></pre>
+      </div>
+      <div>
+        <h3>Layers</h3>
+        <table>
+          <tr><th>Layer</th><th>Technology</th></tr>
+          <tr><td>CLI and ingestion</td><td>Rust, Clap, Rayon for parallel hashing and compression</td></tr>
+          <tr><td>File content</td><td>SHA-256-addressed blobs in Zstandard packs</td></tr>
+          <tr><td>Catalog and events</td><td>Apache Arrow / Parquet</td></tr>
+          <tr><td>Queries</td><td>Embedded DuckDB over the Parquet files</td></tr>
+          <tr><td>File access</td><td>Optional Linux FUSE through <code>fuser</code></td></tr>
+          <tr><td>Runner integration</td><td>TOML adapters and rules, Git hooks, exported agent skill</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="benchmarks">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Benchmarks</h2>
+      <p>Synthetic data anyone can regenerate: a coding agent's task directory checkpointed every round, so only about 5% of
+        a million paths have distinct contents. Whole-process wall time, warm cache, on a 40-core Xeon with ext4.
+        <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/benchmarks/README.md">Tables and reproduction commands.</a></p>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v">2.7x</div><div class="l">faster to ingest</div><div class="s">pack + commit vs add + commit, 1M files</div></div>
+      <div class="stat"><div class="v">252x</div><div class="l">faster <code>git status</code></div><div class="s">9 ms instead of 2.3 s</div></div>
+      <div class="stat"><div class="v">263x</div><div class="l">faster <code>git clone</code></div><div class="s">0.2 s instead of 59 s</div></div>
+      <div class="stat"><div class="v">38x</div><div class="l">smaller than the raw tree</div><div class="s">74 MB store for 2.8 GB of files</div></div>
+    </div>
+    <div class="bench">
+      <figure>
+        <img src="assets/git-commands.png" alt="Bar chart: git on the raw tree versus TrajFS for add+commit, status, push, clone, and checkout at 100k, 300k, and 1M files" width="1840" height="800">
+        <figcaption>Committing a million raw files works, but every later operation pays for them again: <code>status</code> walks the tree,
+          <code>clone</code> and <code>checkout</code> materialize every file, <code>push</code> sends every object. The store is a handful of files.</figcaption>
+      </figure>
+      <div class="note">That chart is Git's best case: a fresh repository and a warm page cache. A repository that already holds runs pays per
+        tracked path on every insertion, and a cold page cache on a spinning disk reads about 200 files per second. Both were measured on the same run.</div>
+      <figure>
+        <img src="assets/git-index-scale.png" alt="git add of one million-file run takes 118 seconds into an empty repository, 11 minutes with 1.3 million paths already tracked, 30 minutes with 2.7 million, extrapolating to hours" width="1800" height="880">
+        <figcaption>The same million-file run added to repositories that already track 0, 1.3 M, and 2.7 M paths: 118 s, 11 min, 30 min.
+          A quadratic fit reaches about 1.5 h at 5 M and 6 h at 11 M. <code>traj pack</code> stays at 11.5 s.
+          <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/benchmarks/git-at-scale.md">Measurements and method.</a></figcaption>
+      </figure>
+      <figure>
+        <img src="assets/space.png" alt="Bar chart of raw tree, packed git objects, and TrajFS store sizes at three run sizes" width="1840" height="740">
+        <figcaption>Git deduplicates identical blobs too, so the honest comparison is against Git's packed objects: the store is 36 to 39x smaller
+          than the tree and about the size of Git's own object store on this highly compressible text.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/read-path.png" alt="Horizontal bar chart of read latency for raw files, traj commands, and the FUSE mount" width="1840" height="1080">
+        <figcaption>Point reads through the CLI cost a process start; the mount matches the raw filesystem for <code>ls</code> and <code>cat</code>.
+          Whole-tree scans should use <code>traj grep</code>, <code>traj find</code>, or SQL, which read the catalog and each distinct content once.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="block install" id="install">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Install</h2>
+      <p>TrajFS runs on Linux. DuckDB is bundled; there is no service to install. Mounting needs FUSE, everything else works without it.</p>
+    </div>
+    <div class="two">
+      <div class="card">
+        <h3>1. Let an agent do it</h3>
+        <p>Paste this into Claude Code, Codex, or Copilot CLI in the repository where you keep experiments.</p>
+        <div class="prompt">Install TrajFS from https://github.com/jingliu9/TrajFS: install the Rust toolchain if missing (rustup), the build prerequisites (build-essential, pkg-config, fuse3 on Debian/Ubuntu), then `cargo install --locked --git https://github.com/jingliu9/TrajFS traj`. Verify with `traj --help`. Then run `traj skill export --out .` here so agents in this repo use traj to read trajectories, and show me the three commands from its README quick start adapted to my run directory.</div>
+      </div>
+      <div class="card">
+        <h3>2. Manual</h3>
+        <p>The first build compiles the bundled DuckDB and takes a few minutes. Add <code>--no-default-features</code> for a smaller binary with neither SQL nor mounting.</p>
+<pre><code><span class="c"># Debian / Ubuntu prerequisites (fuse3 only for mounts)</span>
+sudo apt-get update &amp;&amp; sudo apt-get install -y build-essential pkg-config fuse3
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   <span class="c"># if you have no Rust toolchain</span>
+
+cargo install --locked --git https://github.com/jingliu9/TrajFS traj
+traj --help</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="docs">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Documentation</h2>
+      <p>Everything past the quick start lives in the repository.</p>
+    </div>
+    <div class="links">
+      <a href="https://github.com/jingliu9/TrajFS#guide">Guide<span>Adapters, retention rules, SQL across tasks, automation with watch and hooks, deletion</span></a>
+      <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/PLAN.md">Storage design and test plan<span>Formats, batches, catalog, contracts and limitations</span></a>
+      <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/PLAN-fuse.md">FUSE mount design<span>The read-only projection, caches, memory budget, measurements</span></a>
+      <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/PLAN-deletion.md">Deletion protocol<span>Removing one trajectory from every batch with a verified atomic swap</span></a>
+      <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/granularity.md">Store granularity<span>What one store should contain</span></a>
+      <a href="https://github.com/jingliu9/TrajFS/tree/main/bench">Benchmark suite<span>Synthetic generator, git-vs-TrajFS runner, charts, git-at-scale experiment</span></a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>TrajFS is MIT licensed. <a href="https://github.com/jingliu9/TrajFS">Source on GitHub</a>.</div>
+    <div>Logo and figures: see the repository for credits. Fonts: Barlow Semi Condensed (OFL).</div>
+  </div>
+</footer>
+
+</body>
+</html>

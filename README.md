@@ -20,6 +20,8 @@ Generating agents still write files. Analysis agents get compacted, queryable tr
 
 ---
 
+**Website:** [jingliu.xyz/TrajFS](https://jingliu.xyz/TrajFS/)
+
 [Quick start](#quick-start) | [How it works](#how-it-works) | [Benchmarks](#benchmarks) | [Installation](#installation) | [Guide](#guide)
 
 ## Quick start
