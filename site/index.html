@@ -195,24 +195,25 @@ traj umount ~/traj-mnt/task-a</code></pre>
         <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/benchmarks/README.md">Tables and reproduction commands.</a></p>
     </div>
     <div class="stats">
-      <div class="stat"><div class="v">2.7x</div><div class="l">faster to ingest</div><div class="s">pack + commit vs add + commit, 1M files</div></div>
-      <div class="stat"><div class="v">252x</div><div class="l">faster <code>git status</code></div><div class="s">9 ms instead of 2.3 s</div></div>
-      <div class="stat"><div class="v">263x</div><div class="l">faster <code>git clone</code></div><div class="s">0.2 s instead of 59 s</div></div>
+      <div class="stat"><div class="v">30 min</div><div class="l">to <code>git add</code> one more run</div><div class="s">when the repository already tracks 2.7 M paths</div></div>
+      <div class="stat"><div class="v">11.5 s</div><div class="l"><code>traj pack</code> of the same run</div><div class="s">whatever the repository holds</div></div>
+      <div class="stat"><div class="v">263x</div><div class="l">faster <code>git clone</code></div><div class="s">fresh repository, 1M files: 0.2 s instead of 59 s</div></div>
       <div class="stat"><div class="v">38x</div><div class="l">smaller than the raw tree</div><div class="s">74 MB store for 2.8 GB of files</div></div>
     </div>
     <div class="bench">
       <figure>
-        <img src="assets/git-commands.png" alt="Bar chart: git on the raw tree versus TrajFS for add+commit, status, push, clone, and checkout at 100k, 300k, and 1M files" width="1840" height="800">
-        <figcaption>Committing a million raw files works, but every later operation pays for them again: <code>status</code> walks the tree,
-          <code>clone</code> and <code>checkout</code> materialize every file, <code>push</code> sends every object. The store is a handful of files.</figcaption>
-      </figure>
-      <div class="note">That chart is Git's best case: a fresh repository and a warm page cache. A repository that already holds runs pays per
-        tracked path on every insertion, and a cold page cache on a spinning disk reads about 200 files per second. Both were measured on the same run.</div>
-      <figure>
-        <img src="assets/git-index-scale.png" alt="git add of one million-file run takes 118 seconds into an empty repository, 11 minutes with 1.3 million paths already tracked, 30 minutes with 2.7 million, extrapolating to hours" width="1800" height="880">
-        <figcaption>The same million-file run added to repositories that already track 0, 1.3 M, and 2.7 M paths: 118 s, 11 min, 30 min.
-          A quadratic fit reaches about 1.5 h at 5 M and 6 h at 11 M. <code>traj pack</code> stays at 11.5 s.
+        <img src="assets/git-index-scale.png" alt="git add of one million-file run takes 118 seconds into an empty repository, 11 minutes with 1.3 million paths already tracked, 30 minutes with 2.7 million, extrapolating to hours; traj pack stays at 11.5 seconds" width="1800" height="880">
+        <figcaption><strong>The case that hurts: a repository that already holds runs.</strong> Git keeps every tracked path in one index, so adding
+          the next run costs per path already there. The same million-file run: 118 s into an empty repository, 11 min with 1.3 M paths tracked,
+          30 min with 2.7 M; a quadratic fit reaches about 1.5 h at 5 M and 6 h at 11 M. <code>traj pack</code> stays at 11.5 s.
+          A cold disk adds a floor for any tool, about 80 min for the first read of a million files.
           <a href="https://github.com/jingliu9/TrajFS/blob/main/docs/benchmarks/git-at-scale.md">Measurements and method.</a></figcaption>
+      </figure>
+      <figure>
+        <img src="assets/git-commands.png" alt="Bar chart: git on the raw tree versus TrajFS for add+commit, status, push, clone, and checkout at 100k, 300k, and 1M files" width="1840" height="800">
+        <figcaption><strong>Git's best case: a fresh repository, warm cache.</strong> Committing a million raw files works, but every later operation
+          pays for them again: <code>status</code> walks the tree, <code>clone</code> and <code>checkout</code> materialize every file,
+          <code>push</code> sends every object. The store is a handful of files.</figcaption>
       </figure>
       <figure>
         <img src="assets/space.png" alt="Bar chart of raw tree, packed git objects, and TrajFS store sizes at three run sizes" width="1840" height="740">

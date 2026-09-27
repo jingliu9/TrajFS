@@ -24,7 +24,7 @@ render() {  # cast gif font-size
     --font-size "$3"
     --line-height 1.3
     --fps-cap "${FPS:-20}"
-    --idle-time-limit 3
+    --idle-time-limit 12
     --last-frame-duration "${4:-0.5}"
     --speed "${SPEED:-1}"
   )

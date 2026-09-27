@@ -251,19 +251,43 @@ def end_card(url):
 
 
 def index_scale():
-    """The largest stage of the newest bench/results/index-scale-*.json, if any: what git add costs once the
-    repository already tracks millions of paths, plus the cold-disk read rate. None when not measured."""
+    """The newest bench/results/index-scale-*.json, if any: what git add of the run costs once the
+    repository already tracks millions of paths (every measured stage), a quadratic fit through
+    them for two extrapolated repository sizes, and the cold-disk read rate. None when not measured."""
     import glob
     cands = sorted(glob.glob(os.path.join(REPO, "bench", "results", "index-scale-*.json")))
     if not cands:
         return None
     try:
         d = json.load(open(cands[-1]))
-        st = max(d["stages"], key=lambda x: x["prior_paths"])
-        return {"prior_paths": st["prior_paths"], "add_seconds": st["add_seconds"],
+        stages = sorted(({"prior_paths": st["prior_paths"], "add_seconds": st["add_seconds"]} for st in d["stages"]),
+                        key=lambda x: x["prior_paths"])
+        fit = quadratic_fit([(st["prior_paths"] / 1e6, st["add_seconds"]) for st in stages])
+        extrapolated = [{"prior_paths": m * 1e6, "add_seconds": fit(m)} for m in (5, 11)] if fit else []
+        return {"stages": stages, "extrapolated": extrapolated,
                 "cold_files_per_second": (d.get("cold_cache") or {}).get("cold_files_per_second")}
     except (OSError, KeyError, ValueError):
         return None
+
+
+def quadratic_fit(points):
+    """Least-squares y = a + b x + c x^2 through (x, y) points; a callable, or None with < 3 points."""
+    if len(points) < 3:
+        return None
+    # normal equations, solved by Gaussian elimination (stdlib only)
+    n = len(points)
+    sx = [sum(x ** k for x, _ in points) for k in range(5)]
+    sxy = [sum(y * x ** k for x, y in points) for k in range(3)]
+    a = [[n, sx[1], sx[2], sxy[0]], [sx[1], sx[2], sx[3], sxy[1]], [sx[2], sx[3], sx[4], sxy[2]]]
+    for i in range(3):
+        piv = max(range(i, 3), key=lambda r: abs(a[r][i]))
+        a[i], a[piv] = a[piv], a[i]
+        for r in range(3):
+            if r != i and a[i][i]:
+                f = a[r][i] / a[i][i]
+                a[r] = [a[r][k] - f * a[i][k] for k in range(4)]
+    coef = [a[i][3] / a[i][i] for i in range(3)]
+    return lambda x: coef[0] + coef[1] * x + coef[2] * x * x
 
 
 def fmt_count(n):
@@ -550,9 +574,10 @@ def build(m, traj, offline):
     c.line(f"    {'.git':<32}{RED}{fmt_size(m['git']['git_dir_bytes']):>9}{RESET}   {DIM}after one commit", 0.22)
     scale = index_scale()
     if scale:
+        worst = scale["stages"][-1]
         c.line()
         c.line(DIM + "  and that was the easy case: a fresh repository, files already in the page cache", 0.5)
-        c.line(f"    {'git add -A, repo already tracks ' + fmt_count(scale['prior_paths']) + ' paths':<44}{RED}{fmt_time(scale['add_seconds']):>9}{RESET}   {DIM}measured", 0.3)
+        c.line(f"    {'git add -A, repo already tracks ' + fmt_count(worst['prior_paths']) + ' paths':<44}{RED}{fmt_time(worst['add_seconds']):>9}{RESET}   {DIM}measured", 0.3)
         if scale.get("cold_files_per_second"):
             est = nfiles / scale["cold_files_per_second"]
             c.line(f"    {'first read of the files from a cold disk':<44}{RED}{'~' + fmt_time(est):>9}{RESET}   {DIM}{scale['cold_files_per_second']} files/s measured", 0.3)
@@ -578,6 +603,7 @@ def build(m, traj, offline):
     c.line(f"{fmt_size(tj['store_bytes']).replace(' ', '')}\tstores/task-a.trajstore", 0.3)
     c.line()
     c.line()
+    c.line(DIM + "  fresh repository, warm cache: Git's best case", 0.4)
     hdr = f"    {'':<22}{'git on raw files':>18}{'TrajFS':>16}"
     c.line(BOLD + hdr, 0.6)
     c.line(DIM + "    " + "─" * 76, 0.0)
@@ -589,7 +615,39 @@ def build(m, traj, offline):
         c.line(f"    {name:<22}{fmt_time(a):>18}{fmt_time(b):>16}   {GREEN_B}{fmt_factor(a / max(b, 1e-3)):>7} faster{RESET}  {DIM}{note}", 0.3)
     a, b = m["git"]["git_dir_bytes"], tj["store_bytes"]
     c.line(f"    {'repository size':<22}{fmt_size(a):>18}{fmt_size(b):>16}   {GREEN_B}{fmt_factor(a / b):>7} smaller{RESET}  {DIM}.git vs store", 0.3)
-    c.wait(7.0)
+    c.wait(6.0)
+
+    # 3b. the case that hurts: a repository that already holds runs ---------------------------------
+    if scale:
+        c.marker("3b at scale")
+        c.clear()
+        c.title(3, "The case that hurts: a repository that already holds runs", pad=2)
+        c.comment("# Git keeps every tracked path in one index. Adding the next run costs per path already there;")
+        c.comment("# a store adds a handful of files per batch, so traj pack does not care what the repository holds.")
+        c.line()
+        rows = [(st["prior_paths"], st["add_seconds"], False) for st in scale["stages"]]
+        rows += [(e["prior_paths"], e["add_seconds"], True) for e in scale["extrapolated"]]
+        traj_s = pack_s
+        top = max(sec for _, sec, _ in rows)
+        import math as _math
+        bar_max = 44
+        c.line(BOLD + f"    {'paths already tracked':<30}{'git add of this run':>21}      {'traj pack':>10}", 0.5)
+        c.line(DIM + "    " + "─" * 90, 0.0)
+        for paths, sec, est in rows:
+            label = "0  (fresh repository)" if paths == 0 else (fmt_count(int(paths)) + ("  (extrapolated)" if est else ""))
+            # bars on a log scale from 1 s, so the seconds of traj and the hours of git share one axis
+            n_git = max(1, round(bar_max * _math.log10(max(sec, 1)) / _math.log10(top)))
+            n_traj = max(1, round(bar_max * _math.log10(max(traj_s, 1)) / _math.log10(top)))
+            when = ("~" if est else "") + fmt_time(sec)
+            c.line(f"    {label:<30}{RED}{when:>21}{RESET}      {GREEN_B}{fmt_time(traj_s):>10}{RESET}", 0.35)
+            c.line(f"    {'':<30}{RED}{'█' * n_git}{DIM}{'·' * (bar_max - n_git)}{RESET}  {GREEN}{'█' * n_traj}", 0.0)
+        c.line()
+        c.line(f"    {YELLOW}✗ {fmt_time(rows[-1][1])} for one git add once {fmt_count(int(rows[-1][0]))} paths are tracked{RESET}"
+               f"     {GREEN_B}✓ traj pack: {fmt_time(traj_s)}, always{RESET}", 0.5)
+        if scale.get("cold_files_per_second"):
+            est = nfiles / scale["cold_files_per_second"]
+            c.line(DIM + f"    on a cold disk the first read of the files costs ~{fmt_time(est)} for any tool ({scale['cold_files_per_second']} files/s)", 0.3)
+        c.wait(8.0)
 
     # 4. split view ---------------------------------------------------------------------------------
     c.marker("4 read")

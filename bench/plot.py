@@ -357,6 +357,9 @@ def write_readme(data, path_json, out, read_run):
     rel_json = os.path.relpath(path_json, REPO)
     L = []
     L.append("# Benchmarks on synthetic trajectory trees\n")
+    L.append("Read [git-at-scale.md](git-at-scale.md) first: it measures the case that hurts, a repository that already "
+             "holds runs (git add of one more run grows from 118 s to 30 min with 2.7 M paths tracked, hours beyond) and a "
+             "cold page cache. The numbers below are Git's best case, a fresh repository with a warm cache.\n")
     L.append("Every number here comes from [`bench/run.py`](../../bench/run.py) on generated data, so anyone can "
              "reproduce it without access to private trajectories. The source file for this page is "
              f"[`{rel_json}`](../../{rel_json}); [`bench/plot.py`](../../bench/plot.py) renders the charts and this "
