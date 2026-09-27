@@ -45,6 +45,23 @@ SPINNER = "◐◓◑◒"  # ◐◓◑◒ (geometric shapes, in DejaVu Sans Mono)
 
 
 # --- formatting helpers (shared with the README numbers) --------------------------------------
+
+def index_scale():
+    """The largest stage of the newest bench/results/index-scale-*.json, if any: what git add costs once the
+    repository already tracks millions of paths, plus the cold-disk read rate. None when not measured."""
+    import glob
+    cands = sorted(glob.glob(os.path.join(REPO, "bench", "results", "index-scale-*.json")))
+    if not cands:
+        return None
+    try:
+        d = json.load(open(cands[-1]))
+        st = max(d["stages"], key=lambda x: x["prior_paths"])
+        return {"prior_paths": st["prior_paths"], "add_seconds": st["add_seconds"],
+                "cold_files_per_second": (d.get("cold_cache") or {}).get("cold_files_per_second")}
+    except (OSError, KeyError, ValueError):
+        return None
+
+
 def fmt_count(n):
     return f"{int(n):,}"
 
@@ -335,6 +352,14 @@ def build(m, traj, offline):
     for cmd, sec, note in rows:
         c.line(f"    {cmd:<32}{RED}{fmt_time(sec):>9}{RESET}   {DIM}{note}", 0.22)
     c.line(f"    {'.git':<32}{RED}{fmt_size(m['git']['git_dir_bytes']):>9}{RESET}   {DIM}after one commit", 0.22)
+    scale = index_scale()
+    if scale:
+        c.line()
+        c.line(DIM + "  and that was the easy case: a fresh repository, files already in the page cache", 0.5)
+        c.line(f"    {'git add -A, repo already tracks ' + fmt_count(scale['prior_paths']) + ' paths':<44}{RED}{fmt_time(scale['add_seconds']):>9}{RESET}   {DIM}measured", 0.3)
+        if scale.get("cold_files_per_second"):
+            est = nfiles / scale["cold_files_per_second"]
+            c.line(f"    {'first read of the files from a cold disk':<44}{RED}{'~' + fmt_time(est):>9}{RESET}   {DIM}{scale['cold_files_per_second']} files/s measured", 0.3)
     c.line()
     c.line(YELLOW + "  ✗ every command walks a million files     ✗ every clone and checkout pays again", 0.4)
     c.line(YELLOW + "  ✗ history grows by a whole tree per round  ✗ GitHub file-count and size limits", 0.6)

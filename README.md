@@ -179,6 +179,15 @@ files, so those become milliseconds.
 | clone | 59 s | 0.2 s | **263x faster** |
 | checkout one round back and forward | 12 s | 28 ms | **430x faster** |
 
+That is Git's best case: a fresh repository and a warm page cache. Two ordinary conditions turn the same
+`git add` into hours. A repository that **already holds runs** pays per tracked path on every insertion: the same
+million-file run took 118 s into an empty repository, 11 min with 1.3 M paths already tracked, and 30 min with 2.7 M,
+extrapolating to hours beyond 5 M. And a **cold page cache** on a spinning disk reads 209 files per second, so the
+first pass over a million files is about 80 minutes for any tool, git included. `traj pack` stays at 11.5 s in the
+first case and reads the tree once in the second. [Measurements and method.](docs/benchmarks/git-at-scale.md)
+
+![git add of one run against the paths the repository already tracks](docs/benchmarks/git-index-scale.png)
+
 **Space.** Git deduplicates identical blobs too, so the honest comparison is against Git's own object store, not
 the raw tree.
 

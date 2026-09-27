@@ -55,7 +55,7 @@ For each size the runner generates the tree, then:
 Only the subprocess is timed; stdout is discarded so terminal rendering is not part of the measurement.
 All measurements are warm-cache: before each measured side (TrajFS batch 1, git commit 1, git commit 2, TrajFS
 batch 2) the runner syncs, waits for `Dirty:` in `/proc/meminfo` to drop below 50 MB (at most 60 s) and reads
-every file once with `tar -cf /dev/null`; those passes are recorded under `warmups` and never counted.
+every file once with `find | xargs cat`; those passes are recorded under `warmups` and never counted.
 
 ## Plot
 
@@ -67,3 +67,15 @@ python3 -m venv .venv && .venv/bin/pip install matplotlib
 
 `plot.py` writes `git-commands.png`, `space.png`, `read-path.png` (2x DPI, light background) and regenerates
 `docs/benchmarks/README.md` with the host block, the exact reproduction commands and the results tables.
+
+## Git at scale
+
+`git_index_scale.py` adds the same real run to repositories that already track 0, 1.3 M, and 2.7 M paths (tiny
+sibling runs) and times `git add`, `commit`, and `status` at each size; `plot_index_scale.py` draws
+`docs/benchmarks/git-index-scale.png` with a quadratic fit and its extrapolation. The write-up, including the
+cold-page-cache measurement, is [docs/benchmarks/git-at-scale.md](../docs/benchmarks/git-at-scale.md).
+
+```bash
+python3 bench/git_index_scale.py --tree /data/scale/task-a --prior 0 2 4
+venv/bin/python bench/plot_index_scale.py
+```

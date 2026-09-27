@@ -1,0 +1,60 @@
+{
+  "tree": "/workspace/trajfs-demo/runs/task-a (bench/synthetic_tree.py --files 1000000 --rounds 40)",
+  "git_version": "git version 2.43.0",
+  "host": "Intel Xeon Silver 4114, 40 cores, 187 GB RAM, ext4 on a SATA HDD (page cache warm for the data; index on the same disk)",
+  "note": "siblings are run-shaped trees of 2-byte files (671,580 paths each); the real run is the 1M-file demo tree. Measured with the ad-hoc predecessor of bench/git_index_scale.py; same procedure.",
+  "cold_cache": {
+    "method": "posix_fadvise(DONTNEED) on every file of the run (5.3 GB released from the page cache), then a serial read of one round (24,580 files, 63 MB) with find | xargs cat",
+    "cold_files_per_second": 209,
+    "cold_seconds_one_round": 117.2,
+    "warm_seconds_one_round": 0.84,
+    "disk": "SATA HDD (rotational)"
+  },
+  "stages": [
+    {
+      "prior_runs": 0,
+      "real_files": 999580,
+      "gen_seconds": 0.0,
+      "add_siblings_seconds": null,
+      "commit_siblings_seconds": null,
+      "prior_paths": 0,
+      "status_before_seconds": 0.0,
+      "add_seconds": 118.3,
+      "add_exit": 0,
+      "commit_seconds": 7.8,
+      "status_after_seconds": 2.2,
+      "paths_after": 999580,
+      "index_bytes": 135043973
+    },
+    {
+      "prior_runs": 2,
+      "real_files": 999580,
+      "gen_seconds": 8.1,
+      "add_siblings_seconds": 49.4,
+      "commit_siblings_seconds": 8.9,
+      "prior_paths": 1343160,
+      "status_before_seconds": 2.4,
+      "add_seconds": 660.9,
+      "add_exit": 0,
+      "commit_seconds": 10.7,
+      "status_after_seconds": 4.5,
+      "paths_after": 2342740,
+      "index_bytes": 307170012
+    },
+    {
+      "prior_runs": 4,
+      "real_files": 999580,
+      "gen_seconds": 10.3,
+      "add_siblings_seconds": 86.2,
+      "commit_siblings_seconds": 14.8,
+      "prior_paths": 2686320,
+      "status_before_seconds": 4.5,
+      "add_seconds": 1816.3,
+      "add_exit": 0,
+      "commit_seconds": 13.4,
+      "status_after_seconds": 7.5,
+      "paths_after": 3685900,
+      "index_bytes": 479296050
+    }
+  ]
+}

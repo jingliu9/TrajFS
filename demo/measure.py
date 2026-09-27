@@ -91,7 +91,8 @@ def settle_and_warm(tree):
         if dirty_kb < 50_000:
             break
         time.sleep(0.5)
-    run(["tar", "-cf", "/dev/null", "-C", os.path.dirname(tree), os.path.basename(tree)], timeout=None)
+    # GNU tar skips file contents when its output is /dev/null, so read for real: every file through cat.
+    run(["bash", "-c", f"find {tree} -type f -print0 | xargs -0 -n 2000 -P 8 cat > /dev/null"], timeout=None)
     return round(time.time() - t0, 1)
 
 

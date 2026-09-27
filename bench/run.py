@@ -144,7 +144,8 @@ def settle_and_warm(tree, stage, dirty_limit_mb=50, max_wait_s=60):
     d1 = dirty_mb()
     waited = time.perf_counter() - t0
     t1 = time.perf_counter()
-    p = subprocess.run(["tar", "-cf", "/dev/null", "-C", os.path.dirname(tree), os.path.basename(tree)],
+    # GNU tar skips file contents when its output is /dev/null, so read for real: every file through cat.
+    p = subprocess.run(f"find {tree} -type f -print0 | xargs -0 -n 2000 -P 8 cat > /dev/null", shell=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     read_s = time.perf_counter() - t1
     log(f"  cache settle ({stage}): dirty {d0:.0f} -> {d1:.0f} MB in {waited:.1f} s, warm read pass {read_s:.1f} s")
@@ -576,7 +577,7 @@ def main():
                    "git_timeout_min": args.git_timeout_min, "git_config": dict(GIT_CONFIG),
                    "generator": "bench/synthetic_tree.py", "adapter": "copilot-cli", "rules": "default",
                    "cache": "warm: before each measured side the runner syncs, waits for Dirty: in /proc/meminfo "
-                            "to drop below 50 MB (max 60 s) and reads every file once (tar -cf /dev/null); "
+                            "to drop below 50 MB (max 60 s) and reads every file once (find | xargs cat); "
                             "that pass is recorded per size under warmups but never counted"},
         "sizes_requested": args.sizes, "sizes_run": [], "sizes_skipped": [],
         "runs": [],
