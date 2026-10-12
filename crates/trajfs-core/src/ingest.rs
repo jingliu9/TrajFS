@@ -399,6 +399,7 @@ pub fn ingest_with_max_artifact_bytes(
     let mut new: HashSet<Sha> = HashSet::new();
     let mut small = Vec::new();
     let mut large = Vec::new();
+    let mut new_links = Vec::new();
     let mut unchanged = Vec::new();
     let mut new_blob_bytes = 0u64;
     for (r, &i) in rows.iter().zip(&ok_idx) {
@@ -410,7 +411,7 @@ pub fn ingest_with_max_artifact_bytes(
         }
         new_blob_bytes += r.size as u64;
         match r.kind {
-            Kind::Symlink => {} // handled below from link_targets
+            Kind::Symlink => new_links.push(r.sha),
             Kind::File if r.size as u64 <= pw.chunk_bytes() as u64 => small.push(&snapshots[&i]),
             Kind::File => large.push(&snapshots[&i]),
             Kind::Empty => {}
@@ -424,10 +425,8 @@ pub fn ingest_with_max_artifact_bytes(
             .par_iter()
             .try_for_each(|snapshot| snapshot.verify())
     })?;
-    for (sha, t) in &link_targets {
-        if new.contains(sha) {
-            pw.add_bytes(*sha, t)?;
-        }
+    for sha in new_links {
+        pw.add_bytes(sha, &link_targets[&sha])?;
     }
     pool.install(|| pw.add_snapshots_parallel(&small))?;
     for snapshot in large {
