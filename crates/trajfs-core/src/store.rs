@@ -7,6 +7,7 @@ use crate::pack::{Loc, PackReader};
 use crate::{FileRow, Kind, Sha};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -19,6 +20,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 static EXTRACT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct HashWriter(Sha256);
+
+impl Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 pub struct Store {
     pub root: PathBuf,
@@ -287,7 +301,7 @@ pub struct DirEntry {
     pub bytes: i64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct VerifyReport {
     pub files: u64,
     pub blobs: u64,
@@ -1161,9 +1175,11 @@ impl Store {
                 (l.pack, l.chunk_offset, l.offset)
             });
             for sha in shas {
-                match reader.blob(&index[sha]) {
-                    Ok(bytes) => {
-                        if sha_of_bytes(&bytes) != *sha {
+                let mut hash = HashWriter(Sha256::new());
+                match reader.copy_blob(&index[sha], &mut hash) {
+                    Ok(_) => {
+                        let actual: Sha = hash.0.finalize().into();
+                        if actual != *sha {
                             rep.corrupt.push(hex::encode(sha));
                         }
                     }

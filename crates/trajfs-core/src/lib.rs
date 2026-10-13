@@ -7,6 +7,7 @@
 
 pub mod adapter;
 pub mod catalog;
+pub mod compact;
 pub mod delete;
 pub mod events;
 pub mod hash;

@@ -31,6 +31,23 @@ pub struct IndexRow {
     pub loc: Loc,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameLocation {
+    pub pack: u32,
+    pub offset: i64,
+    pub len: i32,
+}
+
+pub(crate) type FrameIndex = HashMap<Sha, FrameLocation>;
+
+pub(crate) struct FinishedPack {
+    pub rows: Vec<IndexRow>,
+    pub packs: Vec<u32>,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub frames: FrameIndex,
+}
+
 pub fn pack_name(id: u32) -> String {
     format!("{id:04}.pack")
 }
@@ -55,6 +72,7 @@ pub struct PackWriter {
     pub packs_written: Vec<u32>,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    frames: FrameIndex,
 }
 
 impl PackWriter {
@@ -93,11 +111,53 @@ impl PackWriter {
             packs_written: Vec::new(),
             bytes_in: 0,
             bytes_out: 0,
+            frames: HashMap::new(),
         })
     }
 
     pub fn chunk_bytes(&self) -> usize {
         self.chunk_bytes
+    }
+
+    pub(crate) fn reuse_frames(&mut self, frames: FrameIndex) {
+        self.frames = frames;
+    }
+
+    /// Repack an already verified frame without changing its members or their
+    /// byte offsets. Keeping the smaller encoding avoids compression regressions.
+    pub(crate) fn add_existing_frame(
+        &mut self,
+        raw: Vec<u8>,
+        encoded: &[u8],
+        members: &[(Sha, Loc)],
+        compression_level: Option<i32>,
+    ) -> Result<()> {
+        let mut chunk = Chunk {
+            raw,
+            members: Vec::with_capacity(members.len()),
+        };
+        for (sha, loc) in members {
+            let (start, end) = checked_part_range(loc)?;
+            ensure!(
+                end <= chunk.raw.len(),
+                "index points outside compacted frame"
+            );
+            chunk.members.push((*sha, loc.part, start, end - start));
+        }
+        let compressed = if let Some(level) = compression_level {
+            if self
+                .frames
+                .contains_key(&crate::hash::sha_of_bytes(&chunk.raw))
+            {
+                None
+            } else {
+                let candidate = zstd::bulk::compress(&chunk.raw, level)?;
+                (candidate.len() < encoded.len()).then_some(candidate)
+            }
+        } else {
+            None
+        };
+        self.write_frame(&chunk, compressed.as_deref().unwrap_or(encoded))
     }
 
     /// Add a whole blob (already in memory).
@@ -178,6 +238,12 @@ impl PackWriter {
     }
 
     fn write_frame(&mut self, chunk: &Chunk, frame: &[u8]) -> Result<()> {
+        let digest = crate::hash::sha_of_bytes(&chunk.raw);
+        self.bytes_in += chunk.raw.len() as u64;
+        if let Some(location) = self.frames.get(&digest).copied() {
+            self.index_frame(chunk, location);
+            return Ok(());
+        }
         let frame_bytes = frame.len() as u64;
         if MAGIC.len() as u64 + frame_bytes > self.max_pack_bytes {
             bail!(
@@ -200,25 +266,37 @@ impl PackWriter {
             *written += frame.len() as u64;
             (id, off, *written)
         };
-        self.bytes_in += chunk.raw.len() as u64;
         self.bytes_out += frame.len() as u64;
+        let location = FrameLocation {
+            pack: pack_id,
+            offset: chunk_offset,
+            len: frame
+                .len()
+                .try_into()
+                .context("compressed frame is too large")?,
+        };
+        self.frames.insert(digest, location);
+        self.index_frame(chunk, location);
+        if written >= self.max_pack_bytes {
+            self.seal()?;
+        }
+        Ok(())
+    }
+
+    fn index_frame(&mut self, chunk: &Chunk, location: FrameLocation) {
         for (sha, part, offset, size) in &chunk.members {
             self.rows.push(IndexRow {
                 sha: *sha,
                 loc: Loc {
-                    pack: pack_id,
-                    chunk_offset,
-                    chunk_len: frame.len() as i32,
+                    pack: location.pack,
+                    chunk_offset: location.offset,
+                    chunk_len: location.len,
                     offset: *offset as i32,
                     size: *size as i64,
                     part: *part,
                 },
             });
         }
-        if written >= self.max_pack_bytes {
-            self.seal()?;
-        }
-        Ok(())
     }
 
     fn open_current(&mut self) -> Result<(u32, &mut File, &mut u64)> {
@@ -328,10 +406,21 @@ impl PackWriter {
     }
 
     /// Flush pending data, seal the open pack, and return index rows.
-    pub fn finish(mut self) -> Result<(Vec<IndexRow>, Vec<u32>, u64, u64)> {
+    pub fn finish(self) -> Result<(Vec<IndexRow>, Vec<u32>, u64, u64)> {
+        let result = self.finish_with_frames()?;
+        Ok((result.rows, result.packs, result.bytes_in, result.bytes_out))
+    }
+
+    pub(crate) fn finish_with_frames(mut self) -> Result<FinishedPack> {
         self.flush_pending()?;
         self.seal()?;
-        Ok((self.rows, self.packs_written, self.bytes_in, self.bytes_out))
+        Ok(FinishedPack {
+            rows: self.rows,
+            packs: self.packs_written,
+            bytes_in: self.bytes_in,
+            bytes_out: self.bytes_out,
+            frames: self.frames,
+        })
     }
 }
 
@@ -384,6 +473,15 @@ impl PackReader {
             self.files.insert(pack, f);
         }
         Ok(self.files.get(&pack).unwrap())
+    }
+
+    pub(crate) fn encoded_frame(&mut self, pack: u32, offset: i64, len: i32) -> Result<Vec<u8>> {
+        // Reuse all of the normal frame extent and decompression checks.
+        self.frame(pack, offset, len)?;
+        let mut encoded = vec![0; usize::try_from(len).context("negative frame length")?];
+        self.file(pack)?
+            .read_exact_at(&mut encoded, offset as u64)?;
+        Ok(encoded)
     }
 
     /// Decompressed frame at (pack, chunk_offset).

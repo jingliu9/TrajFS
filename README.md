@@ -98,7 +98,7 @@ duplicate-heavy files cheap.
 
 1. **Content-addressed packs.** Every file is hashed with SHA-256 and stored once, in Zstandard-compressed pack
    frames. A checkpoint that repeats yesterday's workspace adds paths, not bytes. Small-file reads decompress one
-   frame, not an archive.
+   frame, not an archive. Identical frames within a pack batch also share bytes, even across different files.
 2. **A columnar catalog.** Paths, directory summaries, exclusions, and the hash-to-pack index are Apache Parquet
    segments. Listing a directory or finding a name is a column scan, not a filesystem walk, and the same segments
    are the tables behind `traj sql`.
@@ -120,6 +120,18 @@ duplicate-heavy files cheap.
 | Queries | Embedded DuckDB over the published Parquet files |
 | File access | Optional Linux FUSE through `fuser`; no full extraction required |
 | Runner integration | TOML adapters and retention rules, Git hooks, and exported agent instructions |
+
+To minimise an archive while retaining every historical path and byte, use
+[`traj compact`](docs/compaction.md). It writes a new store, shares identical
+frames across batches, and deep-verifies both versions:
+
+```bash
+traj compact -S original.trajstore --out compacted.trajstore --json
+traj verify --deep --require-compact --json -S compacted.trajstore
+```
+
+Its report separates logical source bytes, unique content, actual pack bytes and
+metadata overhead. The original store remains available.
 
 A store is a portable directory:
 

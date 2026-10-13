@@ -32,6 +32,8 @@ enum Cmd {
     Doctor,
     /// Pack a source tree into a store (new batch)
     Pack(cmd::pack::PackArgs),
+    /// Losslessly compact into a new store; preserve and deep-verify both stores
+    Compact(cmd::compact::CompactArgs),
     /// Pack automatically whenever the adapter reports a batch ready
     Watch(cmd::pack::WatchArgs),
     /// List a directory
@@ -106,6 +108,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Init(a) => cmd::init::run(a),
         Cmd::Doctor => cmd::init::doctor(),
         Cmd::Pack(a) => cmd::pack::run(a),
+        Cmd::Compact(a) => cmd::compact::run(&stores, a),
         Cmd::Watch(a) => cmd::pack::watch(a),
         Cmd::Ls(a) => cmd::browse::ls(&stores, a),
         Cmd::Tree(a) => cmd::browse::tree(&stores, a),
