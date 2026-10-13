@@ -496,12 +496,18 @@ impl Inodes {
         let Some(info) = self.by_ino.get(&ino) else {
             return false;
         };
-        let previous = info
-            .nlookup
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(n))
-            })
-            .unwrap();
+        let mut current = info.nlookup.load(Ordering::Relaxed);
+        let previous = loop {
+            match info.nlookup.compare_exchange_weak(
+                current,
+                current.saturating_sub(n),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => break previous,
+                Err(actual) => current = actual,
+            }
+        };
         let left = previous.saturating_sub(n);
         if left > 0 {
             return false;
