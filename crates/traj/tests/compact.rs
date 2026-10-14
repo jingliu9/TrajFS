@@ -1,8 +1,9 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use trajfs_core::ingest::{ingest, IngestOptions};
+use trajfs_core::ingest::{ingest, ingest_with_max_artifact_bytes, IngestOptions};
 use trajfs_core::rules::Rules;
 use trajfs_core::{NoAdapter, CHUNK_BYTES};
 
@@ -93,4 +94,96 @@ fn cli_requires_compaction_and_emits_bound_storage_numbers() {
         .arg(&out)
         .assert()
         .failure();
+}
+
+fn traj_with_low_fd_limit() -> Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_traj"));
+    command.env("RAYON_NUM_THREADS", "2");
+    // Only the child receives the lower limit; concurrent tests keep their limits.
+    unsafe {
+        command.pre_exec(|| {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = limit.rlim_max.min(64);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Command::from_std(command)
+}
+
+#[test]
+fn verify_compact_and_read_more_packs_than_the_file_descriptor_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let store = temp.path().join("store");
+    fs::create_dir(&source).unwrap();
+    let mut state = 17_u64;
+    let data: Vec<_> = (0..3 * CHUNK_BYTES)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    fs::write(source.join("payload"), &data).unwrap();
+    ingest_with_max_artifact_bytes(
+        &source,
+        &store,
+        IngestOptions {
+            rules: Rules::resolve("none").unwrap(),
+            rules_name: "none".into(),
+            adapter: &NoAdapter,
+            label: String::new(),
+            jobs: 1,
+            derive: false,
+            store_id: None,
+        },
+        64 * 1024,
+    )
+    .unwrap();
+    let pack_count = fs::read_dir(store.join("packs"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "pack")
+        })
+        .count();
+    assert!(pack_count > 64, "fixture must exceed the child's FD limit");
+
+    traj_with_low_fd_limit()
+        .arg("-S")
+        .arg(&store)
+        .args(["verify", "--deep", "--require-compact", "--json"])
+        .assert()
+        .success();
+    let compacted = temp.path().join("compacted");
+    traj_with_low_fd_limit()
+        .arg("-S")
+        .arg(&store)
+        .args(["compact", "--no-recompress", "--out"])
+        .arg(&compacted)
+        .assert()
+        .success();
+    for candidate in [&store, &compacted] {
+        traj_with_low_fd_limit()
+            .arg("-S")
+            .arg(candidate)
+            .args(["cat", "payload"])
+            .assert()
+            .success()
+            .stdout(data.clone());
+    }
 }
