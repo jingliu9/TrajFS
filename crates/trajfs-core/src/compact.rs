@@ -14,7 +14,8 @@ use std::path::Path;
 fn auxiliary_paths(store: &Store) -> Result<Vec<std::path::PathBuf>> {
     let mut paths = Vec::new();
     // Written by `pack` outside MANIFEST.json, but still part of a portable store.
-    for name in [".gitattributes"] {
+    {
+        let name = ".gitattributes";
         match std::fs::symlink_metadata(store.root.join(name)) {
             Ok(_) => {
                 resolve_store_artifact(&store.root, Path::new(name))?;
