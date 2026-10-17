@@ -44,7 +44,14 @@ fn cli_requires_compaction_and_emits_bound_storage_numbers() {
     let result = traj()
         .arg("-S")
         .arg(&store)
-        .args(["verify", "--deep", "--require-compact", "--json"])
+        .args([
+            "verify",
+            "--deep",
+            "--require-compact",
+            "--jobs",
+            "4",
+            "--json",
+        ])
         .assert()
         .code(1)
         .get_output()
@@ -59,7 +66,7 @@ fn cli_requires_compaction_and_emits_bound_storage_numbers() {
         .arg(&store)
         .args(["compact", "--out"])
         .arg(&out)
-        .args(["--no-recompress", "--json"])
+        .args(["--no-recompress", "--jobs", "4", "--json"])
         .assert()
         .success()
         .get_output()
@@ -67,11 +74,19 @@ fn cli_requires_compaction_and_emits_bound_storage_numbers() {
         .clone();
     let compact: Value = serde_json::from_slice(&result).unwrap();
     assert_eq!(compact["catalog_history_preserved"], true);
+    assert_eq!(compact["compression_workers"], 4);
     assert_eq!(compact["after"]["duplicate_frames"], 0);
     let result = traj()
         .arg("-S")
         .arg(&out)
-        .args(["verify", "--deep", "--require-compact", "--json"])
+        .args([
+            "verify",
+            "--deep",
+            "--require-compact",
+            "--jobs",
+            "4",
+            "--json",
+        ])
         .assert()
         .success()
         .get_output()
@@ -173,7 +188,7 @@ fn verify_compact_and_read_more_packs_than_the_file_descriptor_limit() {
     traj_with_low_fd_limit()
         .arg("-S")
         .arg(&store)
-        .args(["compact", "--no-recompress", "--out"])
+        .args(["compact", "--level", "3", "--jobs", "4", "--out"])
         .arg(&compacted)
         .assert()
         .success();

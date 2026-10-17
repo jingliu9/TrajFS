@@ -4,11 +4,12 @@
 use crate::catalog;
 use crate::hash::sha_of_bytes;
 use crate::manifest::{resolve_store_artifact, sync_dir};
-use crate::pack::{Loc, PackWriter, MAGIC};
+use crate::pack::{Loc, PackReader, PackWriter, MAGIC};
 use crate::{Sha, Store, ARTIFACT_TARGET_BYTES};
 use anyhow::{ensure, Context, Result};
+use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 fn auxiliary_paths(store: &Store) -> Result<Vec<std::path::PathBuf>> {
@@ -78,7 +79,11 @@ struct StorageLayout {
 
 /// Audit actual encoded frames, not just distinct catalog hashes. Memory holds
 /// frame identities and locations; file payloads are read one bounded frame at a time.
-fn layout(store: &Store) -> Result<StorageLayout> {
+fn layout(store: &Store, jobs: usize) -> Result<StorageLayout> {
+    ensure!(
+        (1..=128).contains(&jobs),
+        "frame audit workers must be between 1 and 128"
+    );
     let mut report = StorageReport::default();
     store.for_each_file(false, |row| {
         report.catalog_rows += 1;
@@ -129,9 +134,8 @@ fn layout(store: &Store) -> Result<StorageLayout> {
         .map(|id| (*id, MAGIC.len() as u64))
         .collect();
     let mut best: HashMap<Sha, FrameKey> = HashMap::new();
-    let mut reader = store.reader();
     let mut frame_bytes = 0u64;
-    for (key, digest) in &mut digests {
+    for key in digests.keys() {
         let end = ends
             .get_mut(&key.pack)
             .context("frame references an undeclared pack")?;
@@ -145,16 +149,39 @@ fn layout(store: &Store) -> Result<StorageLayout> {
             *end <= pack_lengths[&key.pack],
             "frame extends beyond its pack"
         );
-        let raw = reader.frame(key.pack, key.offset, key.len)?;
-        *digest = sha_of_bytes(raw);
         frame_bytes += key.len as u64;
-        if let Some(previous) = best.get_mut(digest) {
-            if key.len < previous.len {
-                *previous = *key;
+    }
+    let keys: Vec<_> = digests.keys().copied().collect();
+    let workers = jobs.min(8);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()?;
+    let chunk_size = keys.len().div_ceil(workers).max(1);
+    let chunks: Vec<Result<Vec<_>>> = pool.install(|| {
+        keys.par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut reader =
+                    PackReader::with_open_pack_limit(&store.root.join("packs"), 16 / workers);
+                let mut hashes = Vec::with_capacity(chunk.len());
+                for key in chunk {
+                    let raw = reader.frame(key.pack, key.offset, key.len)?;
+                    hashes.push((*key, sha_of_bytes(raw), raw.len() as u64));
+                }
+                Ok(hashes)
+            })
+            .collect()
+    });
+    for chunk in chunks {
+        for (key, digest, raw_len) in chunk? {
+            *digests.get_mut(&key).context("frame audit lost a key")? = digest;
+            if let Some(previous) = best.get_mut(&digest) {
+                if key.len < previous.len {
+                    *previous = key;
+                }
+            } else {
+                report.unique_frame_bytes += raw_len;
+                best.insert(digest, key);
             }
-        } else {
-            report.unique_frame_bytes += raw.len() as u64;
-            best.insert(*digest, *key);
         }
     }
     for (id, len) in pack_lengths {
@@ -173,7 +200,11 @@ fn layout(store: &Store) -> Result<StorageLayout> {
 }
 
 pub fn storage_report(store: &Store) -> Result<StorageReport> {
-    Ok(layout(store)?.report)
+    storage_report_with_jobs(store, 1)
+}
+
+pub fn storage_report_with_jobs(store: &Store, jobs: usize) -> Result<StorageReport> {
+    Ok(layout(store, jobs)?.report)
 }
 
 #[derive(Debug, Serialize)]
@@ -181,12 +212,23 @@ pub struct CompactionReport {
     pub source: String,
     pub destination: String,
     pub compression_level: Option<i32>,
+    pub compression_workers: usize,
     pub before: StorageReport,
     pub after: StorageReport,
     pub saved_bytes: i128,
     pub source_deep_verified: bool,
     pub destination_deep_verified: bool,
     pub catalog_history_preserved: bool,
+}
+
+/// Progress counts unique uncompressed frames, independently of output compression.
+#[derive(Debug, Serialize)]
+pub struct CompactionProgress {
+    pub phase: &'static str,
+    pub frames_done: u64,
+    pub frames_total: u64,
+    pub raw_bytes_done: u64,
+    pub raw_bytes_total: u64,
 }
 
 /// Write a new store, preserving every catalog row, blob, batch, exclusion,
@@ -197,6 +239,31 @@ pub fn compact(
     destination: &Path,
     compression_level: Option<i32>,
 ) -> Result<CompactionReport> {
+    compact_with_jobs(store, destination, compression_level, 1)
+}
+
+/// Compress bounded groups concurrently and commit frames in their original order.
+/// Catalogs, frame reuse, verification and the existing-encoding fallback are unchanged.
+pub fn compact_with_jobs(
+    store: &Store,
+    destination: &Path,
+    compression_level: Option<i32>,
+    jobs: usize,
+) -> Result<CompactionReport> {
+    compact_with_progress(store, destination, compression_level, jobs, |_| {})
+}
+
+pub fn compact_with_progress(
+    store: &Store,
+    destination: &Path,
+    compression_level: Option<i32>,
+    jobs: usize,
+    mut progress: impl FnMut(&CompactionProgress),
+) -> Result<CompactionReport> {
+    ensure!(
+        (1..=128).contains(&jobs),
+        "compression workers must be between 1 and 128"
+    );
     if let Some(level) = compression_level {
         ensure!(
             (1..=22).contains(&level),
@@ -219,12 +286,28 @@ pub fn compact(
         !parent.starts_with(&store.root),
         "compaction destination must be outside its source store"
     );
-    let verified = store.verify(true)?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .thread_name(|n| format!("traj-compact-{n}"))
+        .build()?;
+    let mut current = CompactionProgress {
+        phase: "verify-source",
+        frames_done: 0,
+        frames_total: 0,
+        raw_bytes_done: 0,
+        raw_bytes_total: 0,
+    };
+    progress(&current);
+    let verified = store.verify_with_jobs(true, jobs)?;
     ensure!(
         verified.ok(),
         "source store fails deep verification: {verified:?}"
     );
-    let source_layout = layout(store)?;
+    current.phase = "audit-source-frames";
+    progress(&current);
+    let source_layout = layout(store, jobs)?;
+    current.frames_total = source_layout.report.unique_frames;
+    current.raw_bytes_total = source_layout.report.unique_frame_bytes;
     let mut manifest = store.manifest.clone();
     manifest.upgrade(&store.root)?;
     let inventory = manifest.artifacts()?;
@@ -271,7 +354,10 @@ pub fn compact(
     }
     let mut reader = store.reader();
     let mut frames = HashMap::new();
+    let mut seen_frames = HashSet::new();
     let mut next_pack = 1;
+    current.phase = "rewrite-frames";
+    progress(&current);
     manifest.batches.sort_by_key(|batch| batch.id);
     for batch in &mut manifest.batches {
         let mut writer = PackWriter::with_max_bytes(
@@ -293,15 +379,52 @@ pub fn compact(
                     .or_default()
                     .push((sha, loc));
             })?;
-            for (key, members) in groups {
-                let digest = source_layout
-                    .digests
-                    .get(&key)
-                    .context("unrecognised source frame")?;
-                let best = source_layout.best[digest];
-                let raw = reader.frame(best.pack, best.offset, best.len)?.to_vec();
-                let encoded = reader.encoded_frame(best.pack, best.offset, best.len)?;
-                writer.add_existing_frame(raw, &encoded, &members, compression_level)?;
+            let mut groups = groups.into_iter();
+            loop {
+                // Two frames per worker bounds live payload memory. Reading uses the
+                // same bounded PackReader; only independent compression runs in parallel.
+                let mut pending = Vec::with_capacity(jobs * 2);
+                for (key, members) in groups.by_ref().take(jobs * 2) {
+                    let digest = source_layout
+                        .digests
+                        .get(&key)
+                        .context("unrecognised source frame")?;
+                    let best = source_layout.best[digest];
+                    let raw = reader.frame(best.pack, best.offset, best.len)?.to_vec();
+                    let encoded = reader.encoded_frame(best.pack, best.offset, best.len)?;
+                    let first = seen_frames.insert(*digest);
+                    if first {
+                        current.frames_done += 1;
+                        current.raw_bytes_done += raw.len() as u64;
+                    }
+                    pending.push((raw, encoded, members, first));
+                }
+                if pending.is_empty() {
+                    break;
+                }
+                let prepared: Vec<Result<_>> = pool.install(|| {
+                    pending
+                        .into_par_iter()
+                        .map(|(raw, mut encoded, members, first)| {
+                            if first {
+                                if let Some(level) = compression_level {
+                                    let candidate = zstd::bulk::compress(&raw, level)?;
+                                    if candidate.len() < encoded.len() {
+                                        encoded = candidate;
+                                    }
+                                }
+                            }
+                            Ok((raw, encoded, members))
+                        })
+                        .collect()
+                });
+                // Indexed parallel collection preserves frame order. The existing
+                // writer rechecks ranges and hashes and shares frames across all batches.
+                for prepared in prepared {
+                    let (raw, encoded, members) = prepared?;
+                    writer.add_existing_frame(raw, &encoded, &members, None)?;
+                }
+                progress(&current);
             }
             let rows = std::mem::take(&mut writer.rows);
             let target = destination.join(&relative);
@@ -327,12 +450,16 @@ pub fn compact(
     manifest.save(&destination)?;
     drop(reader);
     let output = Store::open_unlocked(&destination)?;
-    let verified = output.verify(true)?;
+    current.phase = "verify-destination";
+    progress(&current);
+    let verified = output.verify_with_jobs(true, jobs)?;
     ensure!(
         verified.ok(),
         "compacted store fails deep verification: {verified:?}"
     );
-    let after = storage_report(&output)?;
+    current.phase = "audit-destination-frames";
+    progress(&current);
+    let after = storage_report_with_jobs(&output, jobs)?;
     ensure!(
         after.compact(),
         "compacted store still contains redundant frame data"
@@ -352,10 +479,13 @@ pub fn compact(
         "compaction changed the blob identity set"
     );
     let saved_bytes = source_layout.report.stored_bytes as i128 - after.stored_bytes as i128;
+    current.phase = "complete";
+    progress(&current);
     Ok(CompactionReport {
         source: store.root.display().to_string(),
         destination: destination.display().to_string(),
         compression_level,
+        compression_workers: jobs,
         before: source_layout.report,
         after,
         saved_bytes,

@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
-use trajfs_core::compact::{compact, storage_report};
+use trajfs_core::compact::{compact, compact_with_jobs, storage_report};
 use trajfs_core::hash::sha_of_file;
 use trajfs_core::ingest::{ingest, IngestOptions};
 use trajfs_core::rules::Rules;
@@ -241,4 +241,96 @@ fn compaction_rejects_existing_or_nested_destination_and_corrupt_source() {
     let output = temp.path().join("invalid-output");
     assert!(compact(&store, &output, None).is_err());
     assert!(!output.exists());
+    let serial = store.verify(true).unwrap();
+    let parallel = store.verify_with_jobs(true, 4).unwrap();
+    assert!(!serial.ok() && !parallel.ok());
+    assert_eq!(
+        serde_json::to_value(serial).unwrap(),
+        serde_json::to_value(parallel).unwrap()
+    );
+    for jobs in [0, 129] {
+        assert!(store.verify_with_jobs(true, jobs).is_err());
+    }
+}
+
+#[test]
+fn parallel_compaction_matches_serial_bytes_and_preserves_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let common = noise();
+    for n in 0..12_u8 {
+        let mut bytes = common.clone();
+        // Different whole files share the same large frame. This exercises
+        // duplicate references inside one worker batch and across history.
+        bytes.extend(vec![n; CHUNK_BYTES / 2]);
+        fs::write(source.join(format!("file-{n:02}")), bytes).unwrap();
+    }
+    fs::write(source.join("empty"), []).unwrap();
+    symlink("file-00", source.join("link")).unwrap();
+    let original = temp.path().join("original.trajstore");
+    pack(&source, &original);
+    fs::write(
+        source.join("file-00"),
+        [common.as_slice(), b"changed"].concat(),
+    )
+    .unwrap();
+    fs::set_permissions(source.join("file-00"), fs::Permissions::from_mode(0o755)).unwrap();
+    pack(&source, &original);
+    let store = Store::open(&original).unwrap();
+    let source_manifest = fs::read(original.join("MANIFEST.json")).unwrap();
+    let source_hashes: Vec<_> = store
+        .manifest
+        .artifacts()
+        .unwrap()
+        .all()
+        .map(|p| (p.clone(), sha_of_file(&original.join(p)).unwrap()))
+        .collect();
+    let serial = temp.path().join("serial.trajstore");
+    let parallel = temp.path().join("parallel.trajstore");
+    compact_with_jobs(&store, &serial, Some(5), 1).unwrap();
+    let report = compact_with_jobs(&store, &parallel, Some(5), 4).unwrap();
+    assert_eq!(report.compression_workers, 4);
+    assert!(report.source_deep_verified && report.destination_deep_verified);
+    assert!(report.after.compact());
+    assert_eq!(report.after.unreferenced_pack_bytes, 0);
+    let serial_store = Store::open(&serial).unwrap();
+    let parallel_store = Store::open(&parallel).unwrap();
+    assert_eq!(
+        serde_json::to_value(parallel_store.verify(true).unwrap()).unwrap(),
+        serde_json::to_value(parallel_store.verify_with_jobs(true, 4).unwrap()).unwrap()
+    );
+    assert_eq!(rows(&store), rows(&parallel_store));
+    assert_eq!(
+        fs::read(serial.join("MANIFEST.json")).unwrap(),
+        fs::read(parallel.join("MANIFEST.json")).unwrap()
+    );
+    for p in serial_store.manifest.artifacts().unwrap().all() {
+        assert_eq!(
+            sha_of_file(&serial.join(p)).unwrap(),
+            sha_of_file(&parallel.join(p)).unwrap(),
+            "{}",
+            p.display()
+        );
+    }
+    for row in rows(&store) {
+        assert_eq!(
+            store.read_row(&mut store.reader(), &row, true).unwrap(),
+            parallel_store
+                .read_row(&mut parallel_store.reader(), &row, true)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        fs::read(original.join("MANIFEST.json")).unwrap(),
+        source_manifest
+    );
+    for (p, digest) in source_hashes {
+        assert_eq!(sha_of_file(&original.join(p)).unwrap(), digest);
+    }
+    for jobs in [0, 129] {
+        let invalid = temp.path().join(format!("invalid-{jobs}"));
+        assert!(compact_with_jobs(&store, &invalid, Some(5), jobs).is_err());
+        assert!(!invalid.exists());
+    }
 }

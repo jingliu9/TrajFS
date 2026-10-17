@@ -5,8 +5,9 @@ use crate::hash::sha_of_bytes;
 use crate::manifest::{resolve_store_artifact, Manifest};
 use crate::pack::{Loc, PackReader};
 use crate::{FileRow, Kind, Sha};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use fs2::FileExt;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{CStr, CString};
@@ -1025,6 +1026,16 @@ impl Store {
     /// # }
     /// ```
     pub fn verify(&self, deep: bool) -> Result<VerifyReport> {
+        self.verify_with_jobs(deep, 1)
+    }
+
+    /// Run the same complete verification, with bounded parallel blob hashing.
+    /// At most eight readers share a total allowance of sixteen open pack files.
+    pub fn verify_with_jobs(&self, deep: bool, jobs: usize) -> Result<VerifyReport> {
+        ensure!(
+            (1..=128).contains(&jobs),
+            "verification workers must be between 1 and 128"
+        );
         let mut rep = VerifyReport::default();
         for segment in &self.excluded_segments {
             catalog::verify_excluded(segment, deep)
@@ -1168,23 +1179,40 @@ impl Store {
         rep.files = total;
         rep.blobs = index.len() as u64;
         if deep && rep.missing_packs.is_empty() {
-            let mut reader = self.reader();
             let mut shas: Vec<&Sha> = index.keys().collect();
             shas.sort_by_key(|s| {
                 let l = index[*s][0];
                 (l.pack, l.chunk_offset, l.offset)
             });
-            for sha in shas {
-                let mut hash = HashWriter(Sha256::new());
-                match reader.copy_blob(&index[sha], &mut hash) {
-                    Ok(_) => {
-                        let actual: Sha = hash.0.finalize().into();
-                        if actual != *sha {
-                            rep.corrupt.push(hex::encode(sha));
+            let workers = jobs.min(8);
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()?;
+            let chunk_size = shas.len().div_ceil(workers).max(1);
+            let corrupt: Vec<Vec<String>> = pool.install(|| {
+                shas.par_chunks(chunk_size)
+                    .map(|chunk| {
+                        let mut reader =
+                            PackReader::with_open_pack_limit(&self.packs_dir(), 16 / workers);
+                        let mut corrupt = Vec::new();
+                        for &sha in chunk {
+                            let mut hash = HashWriter(Sha256::new());
+                            match reader.copy_blob(&index[sha], &mut hash) {
+                                Ok(_) => {
+                                    let actual: Sha = hash.0.finalize().into();
+                                    if actual != *sha {
+                                        corrupt.push(hex::encode(sha));
+                                    }
+                                }
+                                Err(e) => corrupt.push(format!("{}: {e:#}", hex::encode(sha))),
+                            }
                         }
-                    }
-                    Err(e) => rep.corrupt.push(format!("{}: {e:#}", hex::encode(sha))),
-                }
+                        corrupt
+                    })
+                    .collect()
+            });
+            for errors in corrupt {
+                rep.corrupt.extend(errors);
             }
         }
         Ok(rep)

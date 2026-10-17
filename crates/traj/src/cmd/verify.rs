@@ -7,6 +7,9 @@ pub struct VerifyArgs {
     /// Re-hash every blob
     #[arg(long)]
     pub deep: bool,
+    /// Parallel hashing workers (at most eight readers and sixteen total pack handles)
+    #[arg(long, default_value_t = super::pack::default_jobs().min(8))]
+    pub jobs: usize,
     /// Audit logical, unique and stored bytes, including duplicate physical frames
     #[arg(long)]
     pub storage: bool,
@@ -20,9 +23,9 @@ pub struct VerifyArgs {
 
 pub fn run(stores: &[String], a: VerifyArgs) -> Result<i32> {
     let st = one_store(stores)?;
-    let rep = st.verify(a.deep)?;
+    let rep = st.verify_with_jobs(a.deep, a.jobs)?;
     let storage = if a.storage || a.require_compact {
-        Some(trajfs_core::compact::storage_report(&st)?)
+        Some(trajfs_core::compact::storage_report_with_jobs(&st, a.jobs)?)
     } else {
         None
     };

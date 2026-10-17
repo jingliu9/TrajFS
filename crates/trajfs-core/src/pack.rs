@@ -448,6 +448,7 @@ pub struct PackReader {
     files: Vec<(u32, File)>,
     cache: Vec<((u32, i64, i32), Vec<u8>)>,
     cache_max: usize,
+    open_pack_limit: usize,
 }
 
 impl PackReader {
@@ -456,11 +457,16 @@ impl PackReader {
     const MAX_OPEN_PACKS: usize = 16;
 
     pub fn new(packs_dir: &Path) -> Self {
+        Self::with_open_pack_limit(packs_dir, Self::MAX_OPEN_PACKS)
+    }
+
+    pub(crate) fn with_open_pack_limit(packs_dir: &Path, limit: usize) -> Self {
         Self {
             packs_dir: packs_dir.to_path_buf(),
             files: Vec::new(),
             cache: Vec::new(),
             cache_max: 8,
+            open_pack_limit: limit.clamp(1, Self::MAX_OPEN_PACKS),
         }
     }
 
@@ -469,7 +475,7 @@ impl PackReader {
             let entry = self.files.remove(position);
             self.files.push(entry);
         } else {
-            if self.files.len() >= Self::MAX_OPEN_PACKS {
+            if self.files.len() >= self.open_pack_limit {
                 // Close before opening the replacement, not after exceeding
                 // the process limit by one descriptor.
                 self.files.remove(0);

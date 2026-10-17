@@ -15,7 +15,7 @@ TrajFS readers.
 
 ```bash
 traj verify --deep --storage --json -S original.trajstore
-traj compact -S original.trajstore --out compacted.trajstore --json
+traj compact -S original.trajstore --out compacted.trajstore --jobs 8 --json
 traj verify --deep --require-compact --json -S compacted.trajstore
 ```
 
@@ -27,6 +27,26 @@ and catalog metadata scale with the store. Exact duplicate frames are shared
 even when their members belong to different files or historical batches.
 Readers retain at most 16 open pack handles each and reopen older packs as
 needed, so verification and compaction do not need one file descriptor per pack.
+
+`--jobs 1` through `--jobs 128` selects the compression worker count. The CLI
+defaults to the available CPU count, capped at 32. Up to two frames per worker
+are prepared at once, then independently compressed and written in original
+order. Exact duplicate frames are compressed only once across the whole store.
+Changing the worker count preserves the serial result's artifact bytes and
+does not relax source or destination verification. Progress is emitted on
+stderr by phase and unique frame/raw-byte counts; the final JSON remains on
+stdout. Blob hashing and frame auditing also run in parallel, using at most
+eight readers with sixteen open pack handles in total. `traj verify --jobs N`
+uses the same bounded readers and complete checks. Catalog ordering and history
+validation remain serial, so elapsed time does not necessarily scale linearly
+with workers.
+
+Level 19 can be expensive even after deduplication. Compare its measured size
+saving and processing time with lower levels or `--no-recompress`. The latter
+still removes duplicate frames and verifies the complete archive. For a
+read-only stratified compression sample, the `compaction_bench` core example
+compares levels 3, 9 and 19 at several worker counts; its timings exclude full
+archive verification and publication and are not an end-to-end estimate.
 
 Both the source and destination must pass native deep verification. Existing or
 nested destinations are refused. Unpublished artifacts are refused rather than
