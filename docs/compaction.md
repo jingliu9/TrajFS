@@ -25,6 +25,8 @@ the new encoding. `--no-recompress` only shares repeated frames and retains thei
 smallest existing encoding. Payload memory is bounded by frame size; identity
 and catalog metadata scale with the store. Exact duplicate frames are shared
 even when their members belong to different files or historical batches.
+Readers retain at most 16 open pack handles each and reopen older packs as
+needed, so verification and compaction do not need one file descriptor per pack.
 
 Both the source and destination must pass native deep verification. Existing or
 nested destinations are refused. Unpublished artifacts are refused rather than

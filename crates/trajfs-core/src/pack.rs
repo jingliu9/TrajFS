@@ -441,26 +441,39 @@ fn build_chunk(items: &[Item]) -> Chunk {
     Chunk { raw, members }
 }
 
-/// Reads blobs back. Caches the most recently decompressed frames (locality: neighbours share a chunk).
+/// Reads blobs back with bounded caches of open packs and decompressed frames.
+/// Neighbouring blobs often share a frame; old pack handles can be reopened.
 pub struct PackReader {
     packs_dir: PathBuf,
-    files: HashMap<u32, File>,
+    files: Vec<(u32, File)>,
     cache: Vec<((u32, i64, i32), Vec<u8>)>,
     cache_max: usize,
 }
 
 impl PackReader {
+    // Several readers may coexist during compaction and verification. Keep room
+    // for their handles, catalogs and output files even under a low OS limit.
+    const MAX_OPEN_PACKS: usize = 16;
+
     pub fn new(packs_dir: &Path) -> Self {
         Self {
             packs_dir: packs_dir.to_path_buf(),
-            files: HashMap::new(),
+            files: Vec::new(),
             cache: Vec::new(),
             cache_max: 8,
         }
     }
 
     fn file(&mut self, pack: u32) -> Result<&File> {
-        if !self.files.contains_key(&pack) {
+        if let Some(position) = self.files.iter().position(|(id, _)| *id == pack) {
+            let entry = self.files.remove(position);
+            self.files.push(entry);
+        } else {
+            if self.files.len() >= Self::MAX_OPEN_PACKS {
+                // Close before opening the replacement, not after exceeding
+                // the process limit by one descriptor.
+                self.files.remove(0);
+            }
             let p = self.packs_dir.join(pack_name(pack));
             let mut f = File::open(&p).with_context(|| format!("open pack {}", p.display()))?;
             let mut magic = [0u8; 9];
@@ -470,9 +483,9 @@ impl PackReader {
             if &magic != MAGIC {
                 bail!("pack {} has a bad magic", p.display());
             }
-            self.files.insert(pack, f);
+            self.files.push((pack, f));
         }
-        Ok(self.files.get(&pack).unwrap())
+        Ok(&self.files.last().unwrap().1)
     }
 
     pub(crate) fn encoded_frame(&mut self, pack: u32, offset: i64, len: i32) -> Result<Vec<u8>> {

@@ -325,6 +325,7 @@ pub fn compact(
     sync_dir(&destination.join("packs"))?;
     sync_dir(&destination.join("catalog"))?;
     manifest.save(&destination)?;
+    drop(reader);
     let output = Store::open_unlocked(&destination)?;
     let verified = output.verify(true)?;
     ensure!(
